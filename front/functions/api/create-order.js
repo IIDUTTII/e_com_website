@@ -134,9 +134,10 @@ export async function onRequest(context) {
       }
       console.log('✅ Razorpay order created:', razorpayOrder.id);
 
-      // Store razorpay_order_id in order document (update)
+      // Store razorpay_order_id in order document (merge — updateMask required so existing fields are not wiped)
       const updateUrl = `https://firestore.googleapis.com/v1/projects/${firebaseProjectId}/databases/(default)/documents/orders/${orderId}`;
-      const updateRes = await fetch(updateUrl, {
+      const updateMask = ['razorpayOrderId', 'updatedAt'].map(f => `updateMask.fieldPaths=${encodeURIComponent(f)}`).join('&');
+      const updateRes = await fetch(`${updateUrl}?${updateMask}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${idToken}` },
         body: JSON.stringify({

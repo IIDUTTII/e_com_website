@@ -87,6 +87,9 @@ export async function onRequest(context) {
       return new Response(JSON.stringify({ error: 'Missing orderId' }), { status: 400 });
     }
 
+    // ─── 2b. OBTAIN SERVICE ACCOUNT TOKEN (used for Firestore reads/writes that bypass rules) ───
+    const accessToken = await getServiceAccountToken(env);
+
     // ─── 3. IMMEDIATE INDEPENDENT AUDIT LOG (BEFORE ANY TRANSACTION) ───
     const auditId = razorpay_payment_id || `pay_${Date.now()}`;
     const auditData = {
@@ -101,31 +104,21 @@ export async function onRequest(context) {
     };
 
     try {
-      const auditUrl = `https://firestore.googleapis.com/v1/projects/${firebaseProjectId}/databases/(default)/documents/payment_audit/${auditId}`;
+      const auditBaseUrl = `https://firestore.googleapis.com/v1/projects/${firebaseProjectId}/databases/(default)/documents`;
+      const auditUrl = `${auditBaseUrl}/payment_audit?documentId=${encodeURIComponent(auditId)}`;
       const auditRes = await fetch(auditUrl, {
-        method: 'PATCH',
-        headers: { 'Authorization': `Bearer ${idToken}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify(toFirestoreDocumentFields(auditData)),
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fields: toFirestoreDocumentFields(auditData) }),
       });
       if (auditRes.ok) {
         console.log('✅ Audit log written:', auditId);
       } else {
-        const err = await auditRes.text();
-        console.error('❌ Audit log failed (non-critical):', err);
+        const errText = await auditRes.text();
+        console.error('⚠️ Audit log non-OK (non-fatal):', auditRes.status, errText);
       }
     } catch (err) {
-      console.error('❌ Audit log error (non-critical):', err.message);
-    }
-
-    // ─── 4. GET SERVICE ACCOUNT TOKEN (for transaction) ───
-    let accessToken;
-    try {
-      accessToken = await getServiceAccountToken(env);
-      console.log('✅ Service Account token obtained');
-    } catch (err) {
-      console.error('❌ Service Account auth failed:', err.message);
-      console.log('⚠️ Falling back to ID token');
-      accessToken = idToken;
+      console.error('⚠️ Audit log error (non-fatal):', err.message);
     }
 
     // ─── 5. READ ORDER (OUTSIDE TRANSACTION) ───
@@ -360,8 +353,12 @@ export async function onRequest(context) {
       if (commitRes.ok) {
         console.log('✅ Transaction committed successfully');
       } else {
-        console.warn('⚠️ Transaction commit response non-200:', await commitRes.text());
+        const commitErrText = await commitRes.text();
+        console.error('❌ Transaction commit FAILED:', commitRes.status, commitErrText);
+        throw new Error(`Firestore transaction commit failed: HTTP ${commitRes.status} — ${commitErrText.slice(0, 300)}`);
       }
+    } else {
+      throw new Error('Could not begin Firestore transaction (no transaction ID returned). Check service-account credentials and Firestore security rules.');
     }
 
     // ─── 13. UPDATE AUDIT LOG TO COMPLETED ───
@@ -371,14 +368,15 @@ export async function onRequest(context) {
         completedAt: new Date(),
       };
       const auditUrl = `https://firestore.googleapis.com/v1/projects/${firebaseProjectId}/databases/(default)/documents/payment_audit/${auditId}`;
-      await fetch(auditUrl, {
+      const auditMask = ['status', 'completedAt'].map(f => `updateMask.fieldPaths=${encodeURIComponent(f)}`).join('&');
+      await fetch(`${auditUrl}?${auditMask}`, {
         method: 'PATCH',
         headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify(toFirestoreDocumentFields(auditUpdate)),
+        body: JSON.stringify({ fields: toFirestoreDocumentFields(auditUpdate) }),
       });
       console.log('✅ Audit log updated to completed');
     } catch (err) {
-      console.error('❌ Audit update error (non-critical):', err.message);
+      console.error('❌ Audit update error:', err.message);
     }
 
     // ─── 14. SAVE PAYMENT RECORD IN `payments` COLLECTION ───
@@ -402,19 +400,22 @@ export async function onRequest(context) {
     };
 
     try {
-      const paymentUrl = `https://firestore.googleapis.com/v1/projects/${firebaseProjectId}/databases/(default)/documents/payments/${paymentRecordId}`;
-      const payRes = await fetch(paymentUrl, {
-        method: 'PATCH',
+      const paymentCreateUrl = `https://firestore.googleapis.com/v1/projects/${firebaseProjectId}/databases/(default)/documents/payments?documentId=${encodeURIComponent(paymentRecordId)}`;
+      const payRes = await fetch(paymentCreateUrl, {
+        method: 'POST',
         headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify(toFirestoreDocumentFields(paymentData)),
+        body: JSON.stringify({ fields: toFirestoreDocumentFields(paymentData) }),
       });
       if (payRes.ok) {
         console.log('✅ Payment record saved:', paymentRecordId);
       } else {
-        console.error('❌ Failed to save payment record:', await payRes.text());
+        const payErrText = await payRes.text();
+        console.error('❌ Failed to save payment record:', payErrText);
+        throw new Error(`Payment record save failed: HTTP ${payRes.status} — ${payErrText.slice(0, 300)}`);
       }
     } catch (err) {
-      console.error('❌ Error saving payment record:', err.message);
+      if (err.message && err.message.startsWith('Payment record save failed')) throw err;
+      throw new Error(`Error saving payment record: ${err.message}`);
     }
 
     // ─── 15. CREATE INVOICE ───
@@ -442,15 +443,22 @@ export async function onRequest(context) {
     };
 
     try {
-      const invUrl = `https://firestore.googleapis.com/v1/projects/${firebaseProjectId}/databases/(default)/documents/invoices/${invoiceId}`;
-      await fetch(invUrl, {
-        method: 'PATCH',
+      const invCreateUrl = `https://firestore.googleapis.com/v1/projects/${firebaseProjectId}/databases/(default)/documents/invoices?documentId=${encodeURIComponent(invoiceId)}`;
+      const invRes = await fetch(invCreateUrl, {
+        method: 'POST',
         headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify(toFirestoreDocumentFields(invoiceData)),
+        body: JSON.stringify({ fields: toFirestoreDocumentFields(invoiceData) }),
       });
-      console.log('✅ Invoice created:', invoiceId);
+      if (invRes.ok) {
+        console.log('✅ Invoice created:', invoiceId);
+      } else {
+        const invErrText = await invRes.text();
+        console.error('❌ Invoice save failed:', invErrText);
+        throw new Error(`Invoice save failed: HTTP ${invRes.status} — ${invErrText.slice(0, 300)}`);
+      }
     } catch (invErr) {
-      console.error('❌ Invoice creation error (non-critical):', invErr.message);
+      console.error('❌ Invoice creation error:', invErr.message);
+      throw invErr;
     }
 
     console.log(`🎉 Payment fully processed for order ${orderId}`);
@@ -474,47 +482,89 @@ export async function onRequest(context) {
   } catch (err) {
     console.error('❌ verify-payment exception:', err);
 
-    // ─── EMERGENCY FALLBACK WRITE FOR VERIFIED PAYMENTS ───
-    if (isSignatureVerified) {
-      console.warn('⚠️ Emergency fallback writing to payment_fallback_logs...');
-      try {
-        const fallbackId = `fallback_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-        const fallbackUrl = `https://firestore.googleapis.com/v1/projects/${firebaseProjectId}/databases/(default)/documents/payment_fallback_logs/${fallbackId}`;
-        await fetch(fallbackUrl, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(toFirestoreDocumentFields({
-            fallbackId,
-            orderId: orderId || 'UNKNOWN',
-            razorpayPaymentId: razorpay_payment_id || 'UNKNOWN',
-            razorpayOrderId: razorpay_order_id || 'UNKNOWN',
-            status: 'verified_with_warning',
-            error: err.message,
-            createdAt: new Date()
-          }))
-        });
-      } catch (e) {
-        console.error('❌ Emergency fallback log failed:', e.message);
-      }
+    // ─── WRITE STRUCTURED FAILURE LOG ───
+    // Always write a paper trail so the real failure is visible to admins.
+    // Try service-account token first (db-wide write), fall back to idToken.
+    const failureId = `fail_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const failurePayload = toFirestoreDocumentFields({
+      failureId,
+      orderId: orderId || 'UNKNOWN',
+      razorpayPaymentId: razorpay_payment_id || 'UNKNOWN',
+      razorpayOrderId: razorpay_order_id || 'UNKNOWN',
+      razorpaySignatureValid: isSignatureVerified,
+      errorMessage: (err && err.message) ? err.message : String(err),
+      errorStack: (err && err.stack) ? String(err.stack).slice(0, 4000) : null,
+      createdAt: new Date(),
+      stage: isSignatureVerified ? 'post_signature_verify' : 'pre_signature_verify',
+    });
 
-      // Return success to the user so they are NOT frustrated after paying money
+    let loggedVia = 'none';
+    try {
+      let writeToken = null;
+      try {
+        writeToken = typeof accessToken !== 'undefined' && accessToken ? accessToken : null;
+      } catch (_) { /* ignore */ }
+      if (!writeToken) {
+        try { writeToken = await getServiceAccountToken(env); loggedVia = 'service_account'; }
+        catch (_) {
+          const authHeader = request.headers.get('Authorization');
+          if (authHeader?.startsWith('Bearer ')) {
+            writeToken = authHeader.split(' ')[1];
+            loggedVia = 'id_token';
+          }
+        }
+      } else {
+        loggedVia = 'service_account';
+      }
+      if (writeToken) {
+        const failCreateUrl = `https://firestore.googleapis.com/v1/projects/${firebaseProjectId}/databases/(default)/documents/payment_failure_logs?documentId=${encodeURIComponent(failureId)}`;
+        const logRes = await fetch(failCreateUrl, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${writeToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ fields: failurePayload }),
+        });
+        console.log(`📝 Failure log written (id=${failureId}, via=${loggedVia}, status=${logRes.status})`);
+      }
+    } catch (logErr) {
+      console.error('❌ Could not write failure log:', logErr.message);
+    }
+
+    // ─── REAL FAILURE — DO NOT SILENTLY SUCCEED ───
+    // Previously this path returned { verified: true } after a verified payment,
+    // which masked downstream Firestore write failures and made the user think
+    // payment succeeded even when nothing was written to the orders collection.
+    // We surface the real error to the front-end and let the user / admin
+    // decide how to reconcile (refund, retry, manual fix).
+    if (isSignatureVerified) {
       return new Response(
         JSON.stringify({
-          verified: true,
-          orderId: orderId || 'order_processed',
-          message: 'Payment successful and verified.',
+          error: `Payment verified on Razorpay but downstream update failed: ${err.message}`,
+          errorStage: 'post_signature_verify',
+          debugId: failureId,
+          orderId: orderId || null,
+          razorpayPaymentId: razorpay_payment_id || null,
         }),
         {
-          status: 200,
+          status: 500,
           headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
         }
       );
     }
 
-    return new Response(JSON.stringify({ error: err.message }), {
-      status: 500,
-      headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
-    });
+    return new Response(
+      JSON.stringify({
+        error: err.message,
+        errorStage: 'pre_signature_verify',
+        debugId: failureId,
+      }),
+      {
+        status: 500,
+        headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
+      }
+    );
   }
 }
 

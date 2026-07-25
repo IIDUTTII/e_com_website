@@ -32,7 +32,7 @@ export async function onRequest(context) {
     }
 
     // Check if user is admin/superadmin
-    const role = await getUserRole(user.localId, env);
+    const role = await getUserRole(user.localId, env, idToken);
     if (!['admin', 'superadmin'].includes(role)) {
       return new Response(JSON.stringify({ error: 'Admin access required' }), { status: 403 });
     }
@@ -84,12 +84,12 @@ async function verifyFirebaseToken(idToken, env) {
   return data.users?.[0] || null;
 }
 
-async function getUserRole(uid, env) {
+async function getUserRole(uid, env, idToken) {
   try {
     const firebaseProjectId = env?.FIREBASE_PROJECT_ID || 'pahadse-13309';
     const url = `https://firestore.googleapis.com/v1/projects/${firebaseProjectId}/databases/(default)/documents/users/${uid}`;
     const res = await fetch(url, {
-      headers: { 'Authorization': `Bearer ${token}` },
+      headers: { 'Authorization': `Bearer ${idToken}` },
     });
     if (!res.ok) return 'user';
     const data = await res.json();
