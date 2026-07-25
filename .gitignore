@@ -40,3 +40,6 @@ front/.wrangler/
 front/.pycache/
 front/py1.py
 front/node_modules/
+# diagnostic scripts
+check-*.cjs
+
