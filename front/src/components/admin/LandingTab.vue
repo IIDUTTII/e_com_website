@@ -69,20 +69,36 @@ onMounted(async () => {
   loading.value = true
   try {
     // Load Landing
-    const lData = await fetchLandingConfig()
-    configs.value.landing = JSON.parse(JSON.stringify(lData))
-    originalConfigs.value.landing = JSON.parse(JSON.stringify(lData))
+    try {
+      const lData = await fetchLandingConfig()
+      configs.value.landing = JSON.parse(JSON.stringify(lData))
+      originalConfigs.value.landing = JSON.parse(JSON.stringify(lData))
+    } catch (e) {
+      console.error('fetchLandingConfig error:', e)
+      configs.value.landing = { hero: { title: 'PahadS', subtitle: 'P', tagline: 'Mountain Store' }, cards: [], story: { heading: 'Our Story', body: '' } }
+      originalConfigs.value.landing = { hero: { title: 'PahadS', subtitle: 'P', tagline: 'Mountain Store' }, cards: [], story: { heading: 'Our Story', body: '' } }
+    }
     
     // Load About
-    const aData = await fetchAboutConfig()
-    configs.value.about = JSON.parse(JSON.stringify(aData))
-    originalConfigs.value.about = JSON.parse(JSON.stringify(aData))
+    try {
+      const aData = await fetchAboutConfig()
+      configs.value.about = JSON.parse(JSON.stringify(aData))
+      originalConfigs.value.about = JSON.parse(JSON.stringify(aData))
+    } catch (e) {
+      console.error('Fetch About Config Error:', e)
+      configs.value.about = { images: {}, text: { heroTitle: 'About Us', section1Body: '', section2Body: '', founderQuote: '' } }
+      originalConfigs.value.about = { images: {}, text: { heroTitle: 'About Us', section1Body: '', section2Body: '', founderQuote: '' } }
+    }
 
     // Load Auth Backgrounds
-    const authSnap = await getDoc(doc(db, 'systemConfig', 'authPages'))
-    if (authSnap.exists()) {
-      authConfig.value = authSnap.data()
-      originalAuthConfig.value = JSON.parse(JSON.stringify(authSnap.data()))
+    try {
+      const authSnap = await getDoc(doc(db, 'systemConfig', 'authPages'))
+      if (authSnap.exists()) {
+        authConfig.value = authSnap.data()
+        originalAuthConfig.value = JSON.parse(JSON.stringify(authSnap.data()))
+      }
+    } catch (e) {
+      console.warn('Auth config read failed (non-critical):', e.message)
     }
   } catch (e) {
     console.error('Failed to load configs:', e)

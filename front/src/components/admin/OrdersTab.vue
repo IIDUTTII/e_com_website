@@ -235,6 +235,8 @@ const fmtDateTime = (ts) => {
 const money = (val) => {
   const n = Number(val)
   return isNaN(n) ? '₹N/A' : `₹${n.toLocaleString('en-IN')}`
+}
+
 const getOrderTimeline = (order) => {
   if (!order) return []
   const events = []

@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 import { fetchAboutConfig } from './db.js'
 
 defineOptions({ name: 'AboutView' })
@@ -7,9 +7,30 @@ defineOptions({ name: 'AboutView' })
 const aboutData = ref(null)
 const loading = ref(true)
 
+const displayData = computed(() => ({
+  text: {
+    heroTitle: aboutData.value?.text?.heroTitle || 'About Us',
+    section1Body: aboutData.value?.text?.section1Body || 'Loading content...',
+    section2Body: aboutData.value?.text?.section2Body || '',
+    founderQuote: aboutData.value?.text?.founderQuote || 'Preserving mountain heritage, one product at a time.'
+  },
+  images: {
+    hero: aboutData.value?.images?.hero || '',
+    village: aboutData.value?.images?.village || '',
+    family: aboutData.value?.images?.family || '',
+    founder: aboutData.value?.images?.founder || '',
+    valley: aboutData.value?.images?.valley || ''
+  }
+}))
+
 onMounted(async () => {
-  aboutData.value = await fetchAboutConfig()
-  loading.value = false
+  try {
+    aboutData.value = await fetchAboutConfig()
+  } catch (e) {
+    console.error('Fetch About Config Error:', e)
+  } finally {
+    loading.value = false
+  }
 })
 </script>
 
@@ -20,33 +41,33 @@ onMounted(async () => {
       <div class="spinner"></div>
     </div>
 
-    <div v-else-if="aboutData" class="about-container">
+<div v-else class="about-container">
       
       <header class="about-hero">
-        <h1 class="hero-title">{{ aboutData.text.heroTitle }}</h1>
+        <h1 class="hero-title">{{ displayData.text.heroTitle }}</h1>
         <p class="hero-subtitle">Seedha Pahadon Se: Shuddh, Pahari, Asli</p>
         <div class="hero-image">
-          <img :src="aboutData.images.hero" alt="Scenic Himalayan Mountains" class="hero-img hero-pos">
+          <img :src="displayData.images.hero" alt="Scenic Himalayan Mountains" class="hero-img hero-pos">
         </div>
       </header>
       
       <section class="story-section alternating-layout">
         <div class="text-content">
           <h2>The Mountain Way of Life</h2>
-          <p class="pre-wrap-text">{{ aboutData.text.section1Body }}</p>
+          <p class="pre-wrap-text">{{ displayData.text.section1Body }}</p>
         </div>
         <div class="image-content">
-          <img :src="aboutData.images.village" alt="Traditional Himalayan village" class="section-img village-pos">
+          <img :src="displayData.images.village" alt="Traditional Himalayan village" class="section-img village-pos">
         </div>
       </section>
-
+      
       <section class="story-section alternating-layout reverse">
         <div class="image-content">
-          <img :src="aboutData.images.family" alt="Local Himachali family" class="section-img family-pos">
+          <img :src="displayData.images.family" alt="Local Himachali family" class="section-img family-pos">
         </div>
         <div class="text-content">
           <h2>Bridging Communities to You</h2>
-          <p class="pre-wrap-text">{{ aboutData.text.section2Body }}</p>
+          <p class="pre-wrap-text">{{ displayData.text.section2Body }}</p>
           <ul class="mission-list">
             <li><strong>Support Local Families:</strong> Sourced from 25+ households across the valley.</li>
             <li><strong>Fair Value:</strong> Eliminating middlemen so fair prices reach producers.</li>
@@ -64,7 +85,7 @@ onMounted(async () => {
           <p>That's when he decided to return to his roots. PahadS was born not as a business, but as a mission.</p>
         </div>
         <div class="image-content">
-          <img :src="aboutData.images.founder" alt="Founder Bhawani Dutt" class="section-img founder-pos">
+          <img :src="displayData.images.founder" alt="Founder Bhawani Dutt" class="section-img founder-pos">
         </div>
       </section>
       
@@ -109,7 +130,7 @@ onMounted(async () => {
           <p class="location-text"><strong>Seraj Valley</strong><br>Mandi District, Himachal Pradesh</p>
           <p class="card-desc">From this small valley, we coordinate with local families who produce traditional goods using methods passed down for generations. We don't own farms — we partner with families who do.</p>
           <div class="small-img-container">
-            <img :src="aboutData.images.valley" alt="Seraj Valley landscape" class="small-img valley-pos">
+            <img :src="displayData.images.valley" alt="Seraj Valley landscape" class="small-img valley-pos">
           </div>
         </div>
         
@@ -126,7 +147,7 @@ onMounted(async () => {
 
       <section class="quote-section">
         <blockquote class="clean-quote">
-          {{ aboutData.text.founderQuote }}
+          {{ displayData.text.founderQuote }}
         </blockquote>
         <div class="quote-author">
           <strong>Bhawani Dutt</strong>
