@@ -40,4 +40,11 @@ test-sa*.js
 .env.*.local
 
 # Node modules
-node_modules/
+node_modules/.agents/
+.claude/
+.firebaserc
+firebase.json
+firestore.indexes.json
+functions/
+skills-lock.json
+../set-claims.js
