@@ -12,8 +12,47 @@ const initializing = ref(true)
 const userOrders = ref([])
 const activeTab = ref('all')
 const searchQ = ref('')
-
 const selectedOrder = ref(null)
+
+// ✋ Cancellation guard for the customer — typed confirmation modal
+const cancelGuard = ref(null)
+function openCancelGuard(order) {
+  cancelGuard.value = { orderId: order?.id || '', shortId: (order?.id || '').slice(0, 8).toUpperCase(), typed: '', processing: false }
+}
+function closeCancelGuard() { cancelGuard.value = null }
+const cancelGuardReady = computed(() =>
+  cancelGuard.value && cancelGuard.value.typed.trim().toUpperCase() === cancelGuard.value.shortId
+)
+
+/* ─── Robust Date Parser ───
+   Handles Firestore Timestamp (.toDate() & {seconds,nanoseconds}),
+   ISO strings, numbers, Date objects, and null/undefined.        */
+const toDate = (ts) => {
+  if (!ts) return null
+  if (ts instanceof Date) return ts
+  if (typeof ts === 'string') {
+    const d = new Date(ts)
+    return isNaN(d.getTime()) ? null : d
+  }
+  if (typeof ts === 'number') {
+    const d = new Date(ts)
+    return isNaN(d.getTime()) ? null : d
+  }
+  if (typeof ts === 'object') {
+    if (typeof ts.toDate === 'function') {
+      try { return ts.toDate() } catch (e) { return null }
+    }
+    if (ts.seconds != null) {
+      return new Date(ts.seconds * 1000 + (ts.nanoseconds || 0) / 1e6)
+    }
+  }
+  return null
+}
+const getSortTime = (order) => {
+  const d = toDate(order?.updatedAt) || toDate(order?.createdAt)
+  return d ? d.getTime() : 0
+}
+
 const requestType = ref('')
 const requestReason = ref('')
 const selectedReturnItems = ref([])
@@ -28,7 +67,7 @@ onMounted(() => {
     onSnapshot(q, (snap) => {
       userOrders.value = snap.docs
         .map(d => ({ id: d.id, ...d.data() }))
-        .sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0))
+        .sort((a, b) => getSortTime(b) - getSortTime(a))
       
       if(selectedOrder.value) {
         const updated = userOrders.value.find(o => o.id === selectedOrder.value.id)
@@ -50,22 +89,49 @@ const filteredOrders = computed(() => {
 
   if (searchQ.value.trim()) {
     const q = searchQ.value.toLowerCase()
-    list = list.filter(o => o.id.toLowerCase().includes(q) || o.items?.some(item => item.name.toLowerCase().includes(q)))
+    list = list.filter(o =>
+      (o.id || '').toLowerCase().includes(q) ||
+      (o.items || []).some(item => (item.name || '').toLowerCase().includes(q))
+    )
   }
   return list
 })
 
-const fmtDate = (ts) => ts?.seconds ? new Date(ts.seconds * 1000).toLocaleDateString('en-IN', { year: 'numeric', month: 'short', day: 'numeric' }) : 'Processing'
-const fmtDateTime = (ts) => ts?.seconds ? new Date(ts.seconds * 1000).toLocaleString('en-IN', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'Processing'
+const fmtDate = (ts) => {
+  const d = toDate(ts)
+  return d ? d.toLocaleDateString('en-IN', { year: 'numeric', month: 'short', day: 'numeric' }) : 'N/A'
+}
+const fmtDateTime = (ts) => {
+  const d = toDate(ts)
+  return d ? d.toLocaleString('en-IN', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'N/A'
+}
 const money = (val) => `₹${Number(val || 0).toLocaleString('en-IN')}`
+
+/* Serialize raw order to JSON for diagnostic dump.
+   Convert Firestore Timestamp objects into readable ISO strings. */
+const formatRaw = (order) => {
+  if (!order) return '{}'
+  const safe = { id: order.id || null }
+  for (const [k, v] of Object.entries(order)) {
+    if (k === 'id') continue
+    if (v && typeof v === 'object' && typeof v.toDate === 'function') {
+      safe[k] = `[Timestamp] ${v.toDate().toISOString()}`
+    } else if (v && typeof v === 'object' && v.seconds != null) {
+      safe[k] = `[Timestamp] ${new Date(v.seconds * 1000).toISOString()}`
+    } else {
+      safe[k] = v
+    }
+  }
+  return JSON.stringify(safe, null, 2)
+}
 
 // ✨ SENIOR LOGIC: Check if order was delivered within last 48 hours (2 Days)
 const isWithinReturnWindow = (order) => {
   if (order.shippingStatus !== 'delivered' || !order.deliveredAt) return false
-  const deliveryTime = order.deliveredAt.seconds * 1000
-  const now = Date.now()
+  const delivered = toDate(order.deliveredAt)
+  if (!delivered) return false
   const twoDaysInMs = 2 * 24 * 60 * 60 * 1000
-  return (now - deliveryTime) <= twoDaysInMs
+  return (Date.now() - delivered.getTime()) <= twoDaysInMs
 }
 
 // Build order timeline from available timestamps
@@ -84,19 +150,39 @@ const getOrderTimeline = (order) => {
 const handleCustomerCancel = async (order) => {
   const reason = prompt('Please enter a reason for cancelling this order:')
   if (reason === null) return // User clicked cancel
-  
-  const confirmMsg = order.paymentMethod === 'online' 
-    ? "Are you sure you want to cancel? Since you paid online, your refund will be processed by admin."
-    : "Are you sure you want to cancel this order?"
-  
-  if (!confirm(confirmMsg)) return
+
+  const isPaid = order.paymentMethod === 'online' && order.paymentStatus === 'paid'
+  if (isPaid) {
+    // Open typed-confirm modal to prevent misclicks on paid cancellation
+    selectedOrder.value = order
+    openCancelGuard(order)
+    cancelGuard.value.reason = reason.trim()
+    return
+  }
+
+  if (!confirm('Are you sure you want to cancel this order?')) return
   processingAction.value = true
   try {
-    await cancelCustomerOrder(order.id, reason.trim())  // ✅ Pass reason
-  } catch(e) { 
-    alert("Cancellation failed: " + e.message) 
-  } finally { 
-    processingAction.value = false 
+    await cancelCustomerOrder(order.id, reason.trim())
+  } catch(e) {
+    alert("Cancellation failed: " + e.message)
+  } finally {
+    processingAction.value = false
+  }
+}
+
+const confirmCustomerCancellation = async () => {
+  if (!cancelGuardReady.value || !cancelGuard.value) return
+  cancelGuard.value.processing = true
+  processingAction.value = true
+  try {
+    await cancelCustomerOrder(cancelGuard.value.orderId, cancelGuard.value.reason || 'Cancelled by customer')
+    cancelGuard.value = null
+  } catch(e) {
+    alert('Cancellation failed: ' + e.message)
+  } finally {
+    cancelGuard.value && (cancelGuard.value.processing = false)
+    processingAction.value = false
   }
 }
 
@@ -189,20 +275,21 @@ const closeOrderModal = () => { selectedOrder.value = null; showRequestForm.valu
             <tbody>
               <tr v-if="filteredOrders.length === 0"><td colspan="7" class="empty-state">No orders found.</td></tr>
               <tr v-for="order in filteredOrders" :key="order.id">
-                <td class="id-col">#{{ order.id.slice(0,8).toUpperCase() }}</td>
+                <td class="id-col">#{{ order.id ? order.id.slice(0,8).toUpperCase() : 'UNKNOWN' }}</td>
                 <td class="text-sub">{{ fmtDateTime(order.createdAt) }}</td>
                 <td class="items-col">
                   <div class="item-stack">
-                    <span v-for="(item, idx) in order.items.slice(0,2)" :key="idx" class="truncate">
-                      {{ item.name }} (x{{ item.quantity }})
+                    <span v-for="(item, idx) in (order.items || []).slice(0,2)" :key="idx" class="truncate">
+                      {{ item.name || 'Item' }} (x{{ item.quantity || 0 }})
                     </span>
-                    <span v-if="order.items.length > 2" class="text-sub" style="font-size: 11px;">+{{ order.items.length - 2 }} more</span>
+                    <span v-if="(order.items || []).length > 2" class="text-sub" style="font-size: 11px;">+{{ (order.items || []).length - 2 }} more</span>
+                    <span v-else-if="!(order.items || []).length" class="text-sub" style="font-size: 11px;">No items</span>
                   </div>
                 </td>
                 <td class="price-col">{{ money(order.amount) }}</td>
                 <td>
-                  <span class="payment-badge" :class="order.paymentMethod">
-                    {{ order.paymentMethod.toUpperCase() }}
+                  <span class="payment-badge" :class="order.paymentMethod || 'unknown'">
+                    {{ (order.paymentMethod || 'N/A').toUpperCase() }}
                     <span v-if="order.paymentStatus" class="payment-status">{{ order.paymentStatus }}</span>
                   </span>
                 </td>
@@ -222,8 +309,8 @@ const closeOrderModal = () => { selectedOrder.value = null; showRequestForm.valu
           
           <div class="modal-header">
             <div>
-              <h3 style="margin: 0 0 4px; font-size: 16px; color: #0F172A;">Order #{{ selectedOrder.id.toUpperCase() }}</h3>
-              <p style="margin: 0; font-size: 13px; color: #64748B;">{{ fmtDateTime(selectedOrder.createdAt) }} • {{ selectedOrder.paymentMethod.toUpperCase() }} • {{ selectedOrder.paymentStatus || 'pending' }}</p>
+              <h3 style="margin: 0 0 4px; font-size: 16px; color: #0F172A;">Order #{{ (selectedOrder.id || 'UNKNOWN').toUpperCase() }}</h3>
+              <p style="margin: 0; font-size: 13px; color: #64748B;">{{ fmtDateTime(selectedOrder.createdAt) }} • {{ (selectedOrder.paymentMethod || 'N/A').toUpperCase() }} • {{ selectedOrder.paymentStatus || 'pending' }}</p>
             </div>
             <button class="close-btn" @click="closeOrderModal">✕</button>
           </div>
@@ -242,7 +329,7 @@ const closeOrderModal = () => { selectedOrder.value = null; showRequestForm.valu
                 </div>
                 <div class="summary-item">
                   <span class="summary-label">Payment Method</span>
-                  <span class="summary-value">{{ selectedOrder.paymentMethod.toUpperCase() }}</span>
+                  <span class="summary-value">{{ (selectedOrder.paymentMethod || 'N/A').toUpperCase() }}</span>
                 </div>
                 <div class="summary-item">
                   <span class="summary-label">Payment Status</span>
@@ -307,17 +394,19 @@ const closeOrderModal = () => { selectedOrder.value = null; showRequestForm.valu
             <!-- Order Items -->
             <div class="modal-items-list">
               <h4 style="margin: 0 0 12px; font-size: 12px; text-transform: uppercase; color: #94A3B8;">Purchased Items</h4>
-              <div v-for="(item, idx) in selectedOrder.items" :key="idx" class="m-item">
+              <div v-if="!(selectedOrder.items || []).length" style="padding: 8px 0; color: #94A3B8; font-size: 13px;">No items in this order.</div>
+              <div v-for="(item, idx) in (selectedOrder.items || [])" :key="idx" class="m-item">
                 <img v-if="item.imageUrl" :src="item.imageUrl" class="m-item-img"/>
+                <div v-else class="m-item-img" style="display:flex;align-items:center;justify-content:center;background:#f1f5f9;color:#94a3b8;font-size:10px;">N/A</div>
                 <div class="m-item-info">
-                  <span class="item-name">{{ item.name }}</span>
+                  <span class="item-name">{{ item.name || 'Unnamed Item' }}</span>
                   <span class="text-sub">{{ item.variant || 'Standard' }}</span>
                   <span class="text-sub" style="font-size: 11px;">Product ID: {{ item.productId || 'N/A' }}</span>
                 </div>
                 <div class="item-price-wrap">
-                  <span class="item-price">Qty: {{ item.quantity }}</span>
+                  <span class="item-price">Qty: {{ item.quantity || 0 }}</span>
                   <span class="item-price">× {{ money(item.price) }}</span>
-                  <span class="item-total">{{ money(item.price * item.quantity) }}</span>
+                  <span class="item-total">{{ money((item.price || 0) * (item.quantity || 0)) }}</span>
                 </div>
               </div>
             </div>
@@ -372,9 +461,9 @@ const closeOrderModal = () => { selectedOrder.value = null; showRequestForm.valu
               <div v-if="showRequestForm" class="request-form-box fade-in">
                 <h4 style="margin: 0 0 10px; font-size: 13px;">Select items to {{ requestType }}:</h4>
                 <div class="return-items-selection">
-                  <label v-for="(item, idx) in selectedOrder.items" :key="idx" class="return-checkbox-label">
-                    <input type="checkbox" :value="item.name" v-model="selectedReturnItems" :disabled="item.isReturnable === false" />
-                    <span>{{ item.name }} <span v-if="item.isReturnable === false" style="color:red; font-size:11px;">(Non-returnable)</span></span>
+                  <label v-for="(item, idx) in (selectedOrder.items || [])" :key="idx" class="return-checkbox-label">
+                    <input type="checkbox" :value="item.name || 'Item'" v-model="selectedReturnItems" :disabled="item.isReturnable === false" />
+                    <span>{{ item.name || 'Item' }} <span v-if="item.isReturnable === false" style="color:red; font-size:11px;">(Non-returnable)</span></span>
                   </label>
                 </div>
 
@@ -385,10 +474,44 @@ const closeOrderModal = () => { selectedOrder.value = null; showRequestForm.valu
                 </div>
               </div>
 
+              <!-- Raw order data dump (visible at end of modal — useful when fields are missing) -->
+              <details class="raw-json-block">
+                <summary>🔍 Raw order data (JSON)</summary>
+                <pre>{{ formatRaw(selectedOrder) }}</pre>
+              </details>
+
             </div>
           </div>
         </div>
       </div>
+    <!-- ✋ Cancellation guard modal (paid orders — typed confirm) -->
+      <Teleport to="body">
+        <div v-if="cancelGuard" class="modal-overlay" @click.self="closeCancelGuard">
+          <div class="modal-card slide-up" style="max-width: 460px;">
+            <div class="modal-header" style="background: #FEF2F2;">
+              <h3 style="margin: 0; font-size: 16px; color: #DC2626;">⚠️ Confirm Cancellation</h3>
+              <button class="close-btn" @click="closeCancelGuard">✕</button>
+            </div>
+            <div class="modal-body">
+              <p style="margin: 0 0 12px; font-size: 13px; color: #475569;">
+                You are about to cancel order <code style="background: #F1F5F9; padding: 2px 6px; border-radius: 4px; font-weight: 600;">{{ cancelGuard.shortId }}</code>.
+                Since this was paid online, our team will process your refund after pickup/cancellation.
+              </p>
+              <p style="margin: 0 0 12px; font-size: 12px; color: #94A3B8;">Refund typically takes 5–7 business days.</p>
+              <label style="display: block; margin-top: 12px;">
+                <span style="font-size: 12px; color: #64748B; display: block; margin-bottom: 6px;">
+                  Type the order id <strong>{{ cancelGuard.shortId }}</strong> to confirm:
+                </span>
+                <input type="text" v-model="cancelGuard.typed" class="clean-input" :placeholder="cancelGuard.shortId" autocomplete="off" style="font-family: monospace; text-transform: uppercase;" />
+              </label>
+              <div class="btn-group" style="margin-top: 16px;">
+                <button class="btn-outline w-100" @click="closeCancelGuard">← Go Back</button>
+                <button class="btn-danger w-100" :disabled="!cancelGuardReady || processingAction" @click="confirmCustomerCancellation">🔒 Cancel & Request Refund</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </Teleport>
     </Teleport>
   </div>
 </template>
@@ -539,6 +662,16 @@ const closeOrderModal = () => { selectedOrder.value = null; showRequestForm.valu
 .return-checkbox-label input { accent-color: #0F172A; }
 .clean-input { width: 100%; border: 1px solid #CBD5E1; border-radius: 6px; padding: 10px; font-family: inherit; font-size: 13px; outline: none; resize: none; height: 80px; box-sizing: border-box;}
 .clean-input:focus { border-color: #0F172A; }
+
+/* Raw JSON dump */
+.raw-json-block { margin-top: 18px; padding: 12px; background: #0F172A; color: #E2E8F0; border-radius: 8px; font-size: 11px; }
+.raw-json-block summary { cursor: pointer; font-size: 12px; font-weight: 600; color: #E2E8F0; padding: 2px 0; user-select: none; }
+.raw-json-block summary:hover { color: #38BDF8; }
+.raw-json-block pre { margin: 10px 0 0; padding: 10px; background: #1E293B; border-radius: 6px; max-height: 280px; overflow: auto; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace; font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; color: #CBD5E1; }
+
+.btn-danger { background: #DC2626; border-color: #DC2626; color: white; padding: 10px 16px; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; border: 1px solid transparent; font-family: inherit; transition: 0.2s; }
+.btn-danger:hover { background: #B91C1C; }
+.btn-danger:disabled { background: #FCA5A5; cursor: not-allowed; opacity: 0.6; }
 
 @media (max-width: 768px) {
   .vendora-page { padding: 80px 12px 40px; }

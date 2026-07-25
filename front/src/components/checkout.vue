@@ -143,7 +143,9 @@ const openRazorpayModal = async (orderPayload) => {
 
           if (!verifyRes.ok) {
             const err = await verifyRes.json();
-            throw new Error(err.error || "Payment verification failed.");
+            const debugSuffix = err.debugId ? `\nDebug ID: ${err.debugId}` : '';
+            const stageSuffix = err.errorStage ? ` [${err.errorStage}]` : '';
+            throw new Error(`${stageSuffix} ${err.error || "Payment verification failed."}${debugSuffix}`);
           }
 
           window.sessionStorage.removeItem('active_promo_discount');
