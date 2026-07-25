@@ -130,7 +130,21 @@ export async function fetchAboutConfig() {
     }
   } catch (e) {
     console.error('Fetch About Config Error:', e)
-    return null
+    return {
+      images: {
+        hero: 'https://firebasestorage.googleapis.com/v0/b/pahadse-13309.firebasestorage.app/o/contact%2Fhero2.jpg?alt=media&token=ff12c12e-3078-411a-bc76-f36b6928eaf1',
+        village: 'https://firebasestorage.googleapis.com/v0/b/pahadse-13309.firebasestorage.app/o/contact%2Fvillage-women.jpg?alt=media&token=2b210d97-e255-499f-a4ab-98f6f67da6bc',
+        family: 'https://firebasestorage.googleapis.com/v0/b/pahadse-13309.firebasestorage.app/o/contact%2Fvillage.jpg?alt=media&token=87f75b78-6bc9-40b0-965a-09efd60260d4',
+        valley: 'https://images.pexels.com/photos/3057904/pexels-photo-3057904.jpeg',
+        founder: 'https://firebasestorage.googleapis.com/v0/b/pahadse-13309.firebasestorage.app/o/contact%2Ffounder.jpg?alt=media&token=afb61aba-bbba-4974-a4d2-4416332d01db'
+      },
+      text: {
+        heroTitle: 'Life in the Himalayas',
+        section1Body: 'The Himalayan region is known for its pristine environment, traditional lifestyles, and rich agricultural heritage. For us, the mountains are not just where we live—they are the very essence of who we are.',
+        section2Body: 'PahadS is more than a storefront; it is a bridge connecting you directly to the authentic mountain families of Himachal Pradesh.',
+        founderQuote: '"I don\'t own farms or produce everything myself. What I do have is deep respect for the mountain families I grew up around. PahadS is my effort to bring their honest work to people who will appreciate it."'
+      }
+    }
   }
 }
 // ─────────────────────────────────────────────────────────────────────────────
@@ -871,8 +885,59 @@ export async function rejectOrderInDb(orderId, adminComment, options = {}) {
 }
 
 // ✨ NEW: STRICT E-COMMERCE ADMIN ACTIONS ✨
-export async function processRefundInDb(orderId) {
-  await updateOrderStatus(orderId, { shippingStatus: 'refunded', refundedAt: serverTimestamp() })
+export async function processRefundInDb(orderId, refundDetails = {}) {
+  /* refundDetails: { txnId, note, processedAt: Date | string }
+     Stored so the audit trail of refunds is forever queryable.      */
+  const payload = {
+    shippingStatus: 'refunded',
+    refundedAt: serverTimestamp(),
+    refundTransactionId: refundDetails.txnId || '',
+    refundNote: refundDetails.note || '',
+    refundProcessedAt: refundDetails.processedAt
+      ? (refundDetails.processedAt instanceof Date
+          ? refundDetails.processedAt
+          : new Date(refundDetails.processedAt))
+      : serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  }
+  await updateOrderStatus(orderId, payload)
+}
+
+/* Admin force-cancel with auto-refund request.
+   Works at any stage EXCEPT delivered/replaced (use Return flow there).
+   For online-paid orders → cancelled_refund_pending + refund_status=requested.
+   For COD/unpaid → cancelled. */
+export async function adminCancelOrderWithRefund(orderId, reason = '') {
+  const ref = doc(db, 'orders', orderId)
+  const snap = await getDoc(ref)
+  if (!snap.exists()) throw new Error('ORDER_NOT_FOUND')
+  const order = snap.data()
+
+  const currentStatus = order.shippingStatus || 'pending'
+  if (['delivered', 'replaced', 'refunded', 'rejected'].includes(currentStatus)) {
+    throw new Error('Terminal state — use Return flow instead.')
+  }
+
+  const isOnlinePaid = order.paymentMethod === 'online' && order.paymentStatus === 'paid'
+  const cleanReason = (reason || '').trim() || 'Cancelled by admin'
+
+  const payload = {
+    shippingStatus: isOnlinePaid ? 'cancelled_refund_pending' : 'cancelled',
+    cancelReason: cleanReason,
+    adminComment: cleanReason,
+    cancelledAt: serverTimestamp(),
+    cancelledBy: auth.currentUser?.uid || 'admin',
+    cancellationSource: 'admin_force',
+    updatedAt: serverTimestamp(),
+  }
+  if (isOnlinePaid) {
+    payload.refund_status = 'requested'
+    payload.refund_reason = cleanReason
+    payload.refund_requested_by = payload.cancelledBy
+    payload.refund_requested_at = serverTimestamp()
+  }
+  await updateDoc(ref, payload)
+  await createAuditLog('ADMIN_CANCEL_WITH_REFUND', 'order', orderId, order, payload)
 }
 
 export async function approveReturnInDb(orderId, paymentMethod) {
@@ -1149,21 +1214,34 @@ export async function rejectRefund(orderId, reason) {
 /**
  * Admin marks refund as completed (money sent to customer)
  */
-export async function completeRefund(orderId) {
+export async function completeRefund(orderId, refundDetails = {}) {
   const user = auth.currentUser;
   if (!user) throw new Error('NOT_LOGGED_IN');
-  
+
   const role = await fetchUserRole();
   if (!['admin', 'superadmin'].includes(role)) throw new Error('ADMIN_ONLY');
 
-  await updateDoc(doc(db, 'orders', orderId), {
+  const payload = {
     refund_status: 'completed',
     refunded_at: serverTimestamp(),
     shippingStatus: 'refunded',
     updatedAt: serverTimestamp(),
-  });
+  };
+  if (refundDetails.txnId) payload.refundTransactionId = refundDetails.txnId;
+  if (refundDetails.note) payload.refundNote = refundDetails.note;
+  if (refundDetails.processedAt) {
+    payload.refundProcessedAt = (refundDetails.processedAt instanceof Date)
+      ? refundDetails.processedAt
+      : new Date(refundDetails.processedAt);
+  }
 
-  await createAuditLog('REFUND_COMPLETED', 'order', orderId, null, { completedBy: user.uid });
+  await updateDoc(doc(db, 'orders', orderId), payload);
+
+  await createAuditLog('REFUND_COMPLETED', 'order', orderId, null, {
+    completedBy: user.uid,
+    txnId: refundDetails.txnId || null,
+    note: refundDetails.note || null,
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
