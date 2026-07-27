@@ -1,6 +1,6 @@
 <script setup>
 import { ref, onMounted } from 'vue'
-import { fetchCoupons, saveCoupons, deleteCouponFromDb, fetchGatewayConfig, setCodStatus, fetchShippingConfig, updateShippingConfig, fetchGlobalSettings, updateGlobalSettings, requestRazorpayKeyUpdate } from '../db.js'
+import { fetchCoupons, saveCoupons, deleteCouponFromDb, fetchGatewayConfig, setCodStatus, fetchShippingConfig, updateShippingConfig } from '../db.js'
 
 const props = defineProps({ userRole: { type: String, default: 'user' } })
 
@@ -9,23 +9,17 @@ const coupons = ref([])
 const couponSaving = ref(false)
 const newCoupon = ref({ code: '', discount: 10, type: 'percent', minOrderAmount: 0, minItems: 0, expiresAt: '', maxUses: 0, active: true })
 
-// ✨ NEW SHIPPING STATE
 const shippingConfig = ref({ fee: 60, freeThreshold: 499, isFreeShippingActive: true })
 const shippingSaving = ref(false)
-const globalSettings = ref({ shippingMode: 'flat', shippingFlatRate: 60, freeShippingAbove: 499, taxPercent: 18, logoUrl: '', razorpayKeyMasked: '' })
-const globalSaving = ref(false)
-const paymentKey = ref({ label: 'razorpay_key_id', value: '' })
 
 onMounted(async () => {
   try {
     const cfg = await fetchGatewayConfig()
     if (cfg) isCodActive.value = cfg.isCodActive ?? true
-    
-    // Fetch Shipping
+
     const shipCfg = await fetchShippingConfig()
     if (shipCfg) shippingConfig.value = { ...shippingConfig.value, ...shipCfg }
 
-    globalSettings.value = { ...globalSettings.value, ...(await fetchGlobalSettings()) }
     coupons.value = await fetchCoupons()
   } catch (e) { console.warn('Settings load failed:', e.message) }
 })
@@ -49,38 +43,6 @@ const saveShippingSettings = async () => {
     alert(e.message)
   } finally {
     shippingSaving.value = false
-  }
-}
-
-
-const saveGlobalSettings = async () => {
-  if (props.userRole !== 'superadmin') return alert('Only SuperAdmin can change global settings.')
-  globalSaving.value = true
-  try {
-    await updateGlobalSettings({
-      shippingMode: globalSettings.value.shippingMode,
-      shippingFlatRate: Number(globalSettings.value.shippingFlatRate) || 0,
-      freeShippingAbove: Number(globalSettings.value.freeShippingAbove) || 0,
-      taxPercent: Number(globalSettings.value.taxPercent) || 0,
-      logoUrl: globalSettings.value.logoUrl || '',
-      razorpayKeyMasked: globalSettings.value.razorpayKeyMasked || '',
-    })
-    alert('Global settings saved.')
-  } catch (e) {
-    alert(e.message)
-  } finally {
-    globalSaving.value = false
-  }
-}
-
-const queuePaymentKeyUpdate = async () => {
-  if (props.userRole !== 'superadmin') return alert('Only SuperAdmin can update payment keys.')
-  try {
-    await requestRazorpayKeyUpdate(paymentKey.value.label, paymentKey.value.value)
-    paymentKey.value.value = ''
-    alert('Payment key update queued for Cloud Function processing.')
-  } catch (e) {
-    alert(e.message)
   }
 }
 
@@ -152,28 +114,6 @@ const saveCouponList = async () => {
       </button>
     </section>
 
-
-    <section v-if="userRole === 'superadmin'" class="settings-card">
-      <div class="card-header"><h3>Global Store Controls</h3><p>Superadmin-only settings for tax, logo, shipping mode, and payment keys.</p></div>
-      <div class="form-grid" style="background: #F8FAFC; padding: 20px; border-radius: 12px; border: 1px solid #E2E8F0;">
-        <div class="input-col"><label>Shipping Mode</label><select v-model="globalSettings.shippingMode" class="c-input"><option value="flat">Flat rate</option><option value="freeAbove">Free above threshold</option></select></div>
-        <div class="input-col"><label>Flat Shipping Rate (₹)</label><input v-model.number="globalSettings.shippingFlatRate" type="number" class="c-input" min="0" /></div>
-        <div class="input-col"><label>Free Shipping Above (₹)</label><input v-model.number="globalSettings.freeShippingAbove" type="number" class="c-input" min="0" /></div>
-        <div class="input-col"><label>GST Tax (%)</label><input v-model.number="globalSettings.taxPercent" type="number" class="c-input" min="0" /></div>
-        <div class="input-col full-span"><label>Logo URL</label><input v-model="globalSettings.logoUrl" class="c-input" placeholder="https://..." /></div>
-      </div>
-      <button class="btn-primary" style="margin-top: 16px;" :disabled="globalSaving" @click="saveGlobalSettings">{{ globalSaving ? 'Saving...' : 'Save Global Settings' }}</button>
-
-      <div class="secret-box">
-        <div class="input-col"><label>Razorpay Key Label</label><input v-model="paymentKey.label" class="c-input" /></div>
-        <div class="input-col"><label>New Key Value</label><input v-model="paymentKey.value" type="password" class="c-input" placeholder="Stored by Cloud Function, not Firestore UI" /></div>
-        <button class="btn-danger" @click="queuePaymentKeyUpdate">Queue Payment Key Update</button>
-      </div>
-    </section>
-
-    <section v-else class="settings-card locked-card">
-      <div class="card-header"><h3>Global Store Controls</h3><p>Only SuperAdmin can manage GST, payment keys, and global settings.</p></div>
-    </section>
 
     <section class="settings-card">
       <div class="card-header"><h3>Promotional Vouchers</h3><p>Create and manage discount codes.</p></div>

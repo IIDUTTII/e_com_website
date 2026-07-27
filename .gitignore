@@ -46,3 +46,29 @@ front/node_modules/
 !.env.example
 front/firestore.rules
 add-admin.js
+
+# Diagnostic / throwaway scripts (debugging helpers — never meant to ship)
+front/check-*.cjs
+check-*.cjs
+front/test-order-*.cjs
+front/test-*.mjs
+test-*.cjs
+test-*.mjs
+*.cjs.bak
+deleteme*
+scratch*
+notes-*.md
+TODO-scratch.md
+
+# Local lifecycle scripts (developer conveniences — never meant to ship)
+start.sh
+start-all.sh
+switch.sh
+stop.sh
+restart.sh
+
+# Log dumps from manual debugging sessions
+*.log
+server.*.log
+front/server.*.log
+wrangler-debug.log

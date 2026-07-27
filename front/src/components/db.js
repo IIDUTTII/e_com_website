@@ -10,7 +10,7 @@
 
 import { db, auth } from '../firebase.js'
 import {
-  collection, getDocs, getDoc, query, where, onSnapshot,
+  collection, getDocs, getDoc, query, where, documentId, onSnapshot,
   doc, setDoc, updateDoc, deleteDoc, addDoc, increment, serverTimestamp, arrayUnion,
   limit, orderBy
 } from 'firebase/firestore'
@@ -568,67 +568,68 @@ export async function deleteProduct(productId) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Batch-fetch live stock for cart items.
- * Returns a Map keyed by `${productId}::${variantLabel}` → { stock, price, isActive, variantActive }
- * Used by cartview.vue and checkout.vue to show out-of-stock warnings.
+ * Single live read: rehydrate cart items with current catalog truth.
+ * Cart doc holds only intent (productId / variantId / quantity). Price, stock,
+ * and active flags come from this query each time cartview / checkout mounts.
+ * No drift detection, no banner, no auto-write-back.
+ * Returns [{ ...cartItem, variantLabel, price, stock, isActive, variantActive, missing? }]
  */
-export async function fetchCartItemsStock(cartItems) {
-  const stockMap = new Map()
-  if (!cartItems || cartItems.length === 0) return stockMap
-
-  const uniqueProductIds = [...new Set(cartItems.map(i => i.productId))]
-  
+export async function fetchLiveCartItems(cartItems) {
+  const out = []
+  if (!Array.isArray(cartItems) || cartItems.length === 0) return out
+  const uniqueIds = [...new Set(cartItems.map(i => i.productId).filter(Boolean))]
+  if (uniqueIds.length === 0) return out
+  const CHUNK = 30
+  const productMap = new Map()
   try {
-    const results = await Promise.allSettled(
-      uniqueProductIds.map(id => getDoc(doc(db, 'products', id)))
-    )
-
-    const productDataMap = new Map()
-    results.forEach((r, idx) => {
-      if (r.status === 'fulfilled' && r.value.exists()) {
-        productDataMap.set(uniqueProductIds[idx], r.value.data())
-      }
-    })
-
-    for (const item of cartItems) {
-      const product = productDataMap.get(item.productId)
-      if (!product) {
-        stockMap.set(`${item.productId}::${item.variant || item.weight || 'Standard'}`, {
-          stock: 0, price: item.price, isActive: false, variantActive: false
-        })
-        continue
-      }
-
-      const variantLabel = item.variant || item.weight || 'Standard'
-      const variants = product.variants || []
-      const variant = variants.find(v => v.label === variantLabel)
-
-      if (!variant) {
-        stockMap.set(`${item.productId}::${variantLabel}`, {
-          stock: 0, price: item.price, isActive: product.isActive !== false, variantActive: false
-        })
-        continue
-      }
-
-      stockMap.set(`${item.productId}::${variantLabel}`, {
-        stock: Number(variant.stock) || 0,
-        price: Number(variant.price) || item.price,
-        isActive: product.isActive !== false,
-        variantActive: variant.active !== false,
-      })
+    for (let i = 0; i < uniqueIds.length; i += CHUNK) {
+      const slice = uniqueIds.slice(i, i + CHUNK)
+      const q = query(collection(db, 'products'), where(documentId(), 'in', slice))
+      const snap = await getDocs(q)
+      snap.forEach(d => productMap.set(d.id, d.data()))
     }
   } catch (e) {
-    console.warn('fetchCartItemsStock failed:', e.message)
+    console.warn('fetchLiveCartItems product read failed:', e?.message || e)
   }
-
-  return stockMap
+  for (const item of cartItems) {
+    const variantLabel = String(item.variant || item.weight || 'Standard')
+    const variantId = String(item.variantId || variantLabel)
+    const product = productMap.get(item.productId)
+    if (!product) {
+      out.push({ ...item, variant: variantLabel, variantId, variantLabel, price: Number(item.price) || 0, stock: 0, isActive: false, variantActive: false, missing: true })
+      continue
+    }
+    const variants = Array.isArray(product.variants) ? product.variants : []
+    const variant =
+      variants.find(v => v.variantId === variantId) ||
+      variants.find(v => v.label === variantId) ||
+      variants.find(v => v.label === variantLabel)
+    out.push({
+      ...item,
+      variant: variantLabel,
+      variantId,
+      variantLabel: variant?.label || variantLabel,
+      price: Number(variant?.price ?? item.price) || 0,
+      stock: Number(variant?.stock) || 0,
+      isActive: product.isActive !== false,
+      variantActive: variant ? variant.active !== false : false,
+      name: product.name || item.name,
+      imageUrl: (product.imageUrls && product.imageUrls[0]) || item.imageUrl || null,
+      slug: item.slug || '',
+    })
+  }
+  return out
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 🛒 CART PRIMITIVES
+// ─────────────────────────────────────────────────────────────────────────────
 
 export async function fetchCart() {
   const user = auth.currentUser
   if (!user) return []
   if (_cartCache.has(user.uid)) return _cartCache.get(user.uid).items ?? []
-  
+
   const snap = await getDoc(doc(db, 'carts', user.uid))
   const data = snap.exists() ? snap.data() : { items: [] }
   _cartCache.set(user.uid, data)
@@ -707,58 +708,6 @@ export async function saveCartItems(updatedItems) {
   await setDoc(cartRef, { items: updatedItems }, { merge: true })
   bustCartCache()
 }
-
-/**
- * Compare current cart snapshot prices with live catalog prices.
- * Returns [{ productId, variant, cartQty, cartPrice, livePrice, delta, variantActive, productActive }, ...]
- * Servers cannot be tricked: create-order.js recreates price server-side from products,
- * but UI freshness benefits from a visible drift report.
- */
-export async function detectCartPriceDrift(cartItems, tolerancePct = 5) {
-  if (!cartItems || cartItems.length === 0) return { drifts: [], hasAnyDrift: false, tolPct: tolerancePct }
-  const liveMap = await fetchCartItemsStock(cartItems)
-  const drifts = []
-  for (const item of cartItems) {
-    const variantLabel = item.variant || item.weight || 'Standard'
-    const key = `${item.productId}::${variantLabel}`
-    const live = liveMap.get(key)
-    if (!live) continue
-    const cartPrice = Number(item.price) || 0
-    const livePrice = Number(live.price) || 0
-    if (livePrice <= 0 || cartPrice <= 0) continue
-    const delta = livePrice - cartPrice
-    const deltaPct = Math.abs(delta) / cartPrice * 100
-    if (deltaPct >= tolerancePct) {
-      drifts.push({
-        productId: item.productId,
-        name: item.name,
-        variant: variantLabel,
-        cartPrice, livePrice, delta, deltaPct: Math.round(deltaPct * 10) / 10,
-        productActive: !!live.isActive, variantActive: !!live.variantActive,
-        stock: Number(live.stock) || 0
-      })
-    }
-  }
-  return { drifts, hasAnyDrift: drifts.length > 0, tolPct: tolerancePct }
-}
-
-/**
- * Replace cart row prices with the live current catalog prices.
- * Use after user agrees to "refresh cart to current prices".
- */
-export async function refreshCartToCurrentPrices(cartItems) {
-  if (!cartItems || cartItems.length === 0) return []
-  const liveMap = await fetchCartItemsStock(cartItems)
-  const updated = cartItems.map(item => {
-    const variantLabel = item.variant || item.weight || 'Standard'
-    const live = liveMap.get(`${item.productId}::${variantLabel}`)
-    if (!live || !live.price) return item
-    return { ...item, price: Number(live.price), priceAtAdd: Number(live.price), priceRefreshedAt: new Date() }
-  })
-  await saveCartItems(updated)
-  return updated
-}
-
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ⭐ PRODUCT REVIEWS (UPDATED LOGIC)

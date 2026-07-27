@@ -3,12 +3,13 @@ import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { db, auth } from '../firebase.js'
 import { doc, getDoc } from 'firebase/firestore'
-import { fetchShippingConfig, fetchCart, createOrderSecure, fetchCartItemsStock, detectCartPriceDrift, refreshCartToCurrentPrices } from './db.js'
+import { fetchShippingConfig, fetchCart, createOrderSecure, fetchLiveCartItems } from './db.js'
 
 defineOptions({ name: 'Checkout' })
 const router = useRouter()
 
 const cartItems = ref([])
+const liveItems = ref([])
 const loading = ref(true)
 const userAccountData = ref(null)
 const processingOrder = ref(false)
@@ -18,47 +19,13 @@ const selectedPaymentMethod = ref('online')
 const appliedPromoCode = ref(window.sessionStorage.getItem('active_promo_code') || null)
 const appliedPromoDiscount = ref(Number(window.sessionStorage.getItem('active_promo_discount')) || 0)
 const shippingConfig = ref({ fee: 60, freeThreshold: 499, isFreeShippingActive: true })
-const stockMap = ref(new Map())
-const stockLoading = ref(false)
-
-async function refreshStock() {
-  if (!cartItems.value.length) { stockMap.value = new Map(); return }
-  stockLoading.value = true
-  try {
-    stockMap.value = await fetchCartItemsStock(cartItems.value)
-    await checkPriceDrift()
-  } catch (e) { console.warn('Stock refresh failed:', e) }
-  finally { stockLoading.value = false }
-}
-
-const priceDrifts = ref([])
-const priceDriftVisible = ref(false)
-
-async function checkPriceDrift() {
-  try {
-    const report = await detectCartPriceDrift(cartItems.value, 5)
-    priceDrifts.value = report.drifts
-    priceDriftVisible.value = false
-  } catch (e) {
-    console.warn('Price drift check failed:', e)
-  }
-}
-
-async function acceptDriftAndProceed() { priceDriftVisible.value = false }
-async function refreshCartPrices() {
-  try {
-    const updated = await refreshCartToCurrentPrices(cartItems.value)
-    cartItems.value = updated
-    priceDrifts.value = []
-    priceDriftVisible.value = false
-  } catch (e) {
-    alert('Failed to refresh: ' + e.message)
-  }
-}
 
 function getItemStockInfo(item) {
-  const key = `${item.productId}::${item.variant || item.weight || 'Standard'}`
-  return stockMap.value.get(key) || null
+  return liveItems.value.find(li =>
+    li.productId === item.productId &&
+    (li.variantId === (item.variantId || item.variant || item.weight || 'Standard') ||
+     li.variantLabel === (item.variant || item.weight || 'Standard'))
+  ) || null
 }
 
 function isItemOutOfStock(item) {
@@ -86,13 +53,13 @@ onMounted(() => {
 
   auth.onAuthStateChanged(async (user) => {
     if (!user) { router.push('/login'); return }
-    
+
     try {
       cartItems.value = await fetchCart();
       if (cartItems.value.length === 0) { router.push('/'); return; }
 
-      // Fetch live stock for all cart items
-      await refreshStock()
+      // Fetch live prices + stock for all cart items (single read)
+      liveItems.value = await fetchLiveCartItems(cartItems.value)
 
       const userSnap = await getDoc(doc(db, 'users', user.uid))
       if (userSnap.exists()) {
@@ -103,7 +70,7 @@ onMounted(() => {
 
       const configSnap = await getDoc(doc(db, 'systemConfig', 'gateways'))
       if (configSnap.exists()) isCodGloballyActive.value = configSnap.data().isCodActive
-      
+
       const shipCfg = await fetchShippingConfig()
       if (shipCfg) shippingConfig.value = shipCfg
 
@@ -112,8 +79,15 @@ onMounted(() => {
   })
 })
 
-// These computed values are now **only for UI display** – not used in backend requests.
-const subtotal = computed(() => cartItems.value.reduce((s, i) => s + i.price * i.quantity, 0))
+// Live prices come from fetchLiveCartItems. cartItems (from fetchCart) only
+// has quantities + variant ids; `liveItems` carries the latest server-side
+// price/stock. For totals we always read from liveItems.
+const displayItems = computed(() => cartItems.value.map(ci => {
+  const live = liveItems.value.find(li => li.productId === ci.productId && (li.variantId === (ci.variantId || ci.variant || ci.weight || 'Standard') || li.variantLabel === (ci.variant || ci.weight || 'Standard')))
+  return live ? { ...ci, price: live.price ?? ci.price, name: live.name ?? ci.name, imageUrl: live.imageUrl ?? ci.imageUrl } : ci
+}))
+
+const subtotal = computed(() => displayItems.value.reduce((s, i) => s + i.price * i.quantity, 0))
 const shippingCost = computed(() => {
   if (subtotal.value === 0) return 0
   if (shippingConfig.value.isFreeShippingActive && subtotal.value >= shippingConfig.value.freeThreshold) return 0
@@ -218,11 +192,6 @@ const processCheckoutSubmission = async () => {
     return;
   }
 
-  if (priceDrifts.value.length > 0 && !priceDriftVisible.value) {
-    priceDriftVisible.value = true;
-    return;
-  }
-
   processingOrder.value = true;
 
   const target = activeSelectedAddressObject.value;
@@ -286,34 +255,6 @@ const processCheckoutSubmission = async () => {
         <div class="form-content-wrapper">
           
           <h1 class="page-main-title">Checkout</h1>
-
-          <div v-if="priceDrifts.length > 0" class="drift-banner" :class="{ expanded: priceDriftVisible }">
-            <div class="drift-head">
-              <span class="drift-icon">💸</span>
-              <span v-if="!priceDriftVisible">
-                {{ priceDrifts.length }} item{{ priceDrifts.length === 1 ? '' : 's' }} have a different price than when you added to cart.
-              </span>
-              <span v-else>Review the price changes before checkout:</span>
-              <button v-if="!priceDriftVisible" class="drift-toggle" @click="priceDriftVisible = true">Review</button>
-            </div>
-            <ul v-if="priceDriftVisible" class="drift-list">
-              <li v-for="d in priceDrifts" :key="d.productId + d.variant">
-                <strong>{{ d.name }}</strong> <span class="drift-variant">({{ d.variant }})</span><br />
-                Cart price: ₹{{ d.cartPrice }} → Current price: <strong>₹{{ d.livePrice }}</strong>
-                <span :class="['drift-arrow', d.delta > 0 ? 'up' : 'down']">
-                  {{ d.delta > 0 ? '↑' : '↓' }} ₹{{ Math.abs(d.delta) }} ({{ d.deltaPct }}%)
-                </span>
-              </li>
-            </ul>
-            <div v-if="priceDriftVisible" class="drift-actions">
-              <button class="btn-dark-outline" @click="refreshCartPrices">Refresh cart to current prices</button>
-              <button class="btn-primary-large" @click="acceptDriftAndProceed">Proceed with cart snapshot</button>
-            </div>
-            <p v-if="priceDriftVisible" class="drift-note">
-              💡 Your payment will be calculated against the <strong>current</strong> server-side prices either way —
-              refresh just keeps the displayed cart in sync.
-            </p>
-          </div>
 
           <section class="checkout-section">
             <div class="section-header">
@@ -397,7 +338,7 @@ const processCheckoutSubmission = async () => {
           </div>
 
           <div class="basket-items-list">
-            <div v-for="(item, idx) in cartItems" :key="idx" :class="['summary-item-row', { 'oos-item-row': isItemOutOfStock(item) }]">
+            <div v-for="(item, idx) in displayItems" :key="idx" :class="['summary-item-row', { 'oos-item-row': isItemOutOfStock(item) }]">
               <div class="item-left">
                 <div class="thumb"><img v-if="item.imageUrl" :src="item.imageUrl" /><span v-else>{{ item.emoji || '🍯' }}</span></div>
                 <div class="info">
