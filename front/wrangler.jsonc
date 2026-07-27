@@ -1,0 +1,24 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "pahadse",
+  "compatibility_date": "2026-07-24",
+  "pages_build_output_dir": "dist",
+  "observability": {
+    "enabled": true
+  },
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "vars": {
+    "VITE_FIREBASE_API_KEY": "AIzaSyABec4VYQBnHpyzP1IX4TmW8muY3_VQHDM",
+    "VITE_FIREBASE_AUTH_DOMAIN": "pahadse-13309.firebaseapp.com",
+    "VITE_FIREBASE_PROJECT_ID": "pahadse-13309",
+    "VITE_FIREBASE_STORAGE_BUCKET": "pahadse-13309.firebasestorage.app",
+    "VITE_FIREBASE_MESSAGING_SENDER_ID": "908688256370",
+    "VITE_FIREBASE_APP_ID": "1:908688256370:web:131b7ccb4248b6f51a41eb",
+    "VITE_FIREBASE_MEASUREMENT_ID": "G-KXKTYE3V7L",
+    "VITE_RAZORPAY_KEY_ID": "rzp_test_T54mB31WZLQDv4",
+    "VITE_SUPABASE_URL": "https://vhhkoymtgzouapdmbxfy.supabase.co",
+    "VITE_SUPABASE_ANON_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZoaGtveW10Z3pvdWFwZG1ieGZ5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY0MTc4MDEsImV4cCI6MjA5MTk5MzgwMX0.kdUAjWUJw3ji-4BmpkrGqH00lY-ioFi_pQGaJq6ZMBk"
+  }
+}
