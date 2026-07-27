@@ -68,9 +68,18 @@ export async function onRequest(context) {
       orderId: orderId, // store orderId as a field for query fallback
     };
 
-    const firebaseProjectId = env.FIREBASE_PROJECT_ID || 'pahadse-13309';
-    const razorpayKeyId = env.RAZORPAY_KEY_ID || 'rzp_test_T54mB31WZLQDv4';
-    const razorpayKeySecret = env.RAZORPAY_KEY_SECRET || 'wBOsE6IhL3Fkr5Jt3Jr1xHi8';
+    const firebaseProjectId = env.FIREBASE_PROJECT_ID;
+    const razorpayKeyId = env.RAZORPAY_KEY_ID;
+    const razorpayKeySecret = env.RAZORPAY_KEY_SECRET;
+
+    if (!firebaseProjectId || !razorpayKeyId || !razorpayKeySecret) {
+      console.error('create-order: missing required env (FIREBASE_PROJECT_ID / RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET)');
+      return new Response(JSON.stringify({
+        error: 'Payment processor is temporarily unavailable. Please try again shortly.',
+        errorStage: 'config_missing',
+        orderId: null,
+      }), { status: 500, headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' } });
+    }
 
     // ─── 1. CREATE ORDER DOCUMENT WITH SPECIFIC ID ───
     const createUrl = `https://firestore.googleapis.com/v1/projects/${firebaseProjectId}/databases/(default)/documents/orders?documentId=${orderId}`;
