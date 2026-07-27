@@ -3,7 +3,7 @@ import { ref, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { auth, db } from '../firebase.js'
 import { collection, query, where, onSnapshot } from 'firebase/firestore'
-import { updateOrderStatus, formatOrderStatus, cancelCustomerOrder, requestRefund } from './db.js'
+import { updateOrderStatus, formatOrderStatus, cancelCustomerOrder, requestRefund, requestReturnFSM, WAREHOUSE_ADDRESS } from './db.js'
 
 defineOptions({ name: 'UserOrders' })
 const router = useRouter()
@@ -107,22 +107,43 @@ const fmtDateTime = (ts) => {
 }
 const money = (val) => `₹${Number(val || 0).toLocaleString('en-IN')}`
 
-/* Serialize raw order to JSON for diagnostic dump.
-   Convert Firestore Timestamp objects into readable ISO strings. */
-const formatRaw = (order) => {
-  if (!order) return '{}'
-  const safe = { id: order.id || null }
-  for (const [k, v] of Object.entries(order)) {
-    if (k === 'id') continue
-    if (v && typeof v === 'object' && typeof v.toDate === 'function') {
-      safe[k] = `[Timestamp] ${v.toDate().toISOString()}`
-    } else if (v && typeof v === 'object' && v.seconds != null) {
-      safe[k] = `[Timestamp] ${new Date(v.seconds * 1000).toISOString()}`
-    } else {
-      safe[k] = v
+/* Friendly text for the pickup mode admin sets. */
+const pickupGuidance = (order) => {
+  if (!order?.pickupMode) return null
+  if (order.pickupMode === 'pickup') {
+    return {
+      icon: '🚚',
+      title: 'Reverse Pickup Scheduled',
+      body: 'Our delivery partner will pick up the original item from your address. Please keep the item packed and your phone reachable.',
+      tone: 'info',
     }
   }
-  return JSON.stringify(safe, null, 2)
+  if (order.pickupMode === 'selfship') {
+    return {
+      icon: '📮',
+      title: 'Self-Ship via India Post / Speed Post',
+      body: 'Please courier the original item to our warehouse address below. Mail it within 5 days.',
+      tone: 'success',
+      showAddress: true,
+    }
+  }
+  return null
+}
+
+const copyWarehouseAddr = async () => {
+  const text = [
+    WAREHOUSE_ADDRESS.name,
+    WAREHOUSE_ADDRESS.line1,
+    WAREHOUSE_ADDRESS.line2,
+    `${WAREHOUSE_ADDRESS.country} – ${WAREHOUSE_ADDRESS.pincode}`,
+    `Phone: ${WAREHOUSE_ADDRESS.phone}`,
+  ].join('\n')
+  try {
+    await navigator.clipboard.writeText(text)
+    alert('Warehouse address copied. Paste it on your Speed Post parcel.')
+  } catch (e) {
+    alert('Copy failed. Address:\n\n' + text)
+  }
 }
 
 // ✨ SENIOR LOGIC: Check if order was delivered within last 48 hours (2 Days)
@@ -210,21 +231,38 @@ const openRequestForm = (type) => {
 const submitReverseLogisticsRequest = async () => {
   if (selectedReturnItems.value.length === 0) return alert("Please select at least one item to return/replace.")
   if (!requestReason.value.trim()) return alert("Please specify a reason for your request.")
-  
+
   processingAction.value = true
   const statusPayload = requestType.value === 'return' ? 'return_requested' : 'replacement_requested'
-  
+
+  const note = requestReason.value.trim()
   const updateFields = {
     shippingStatus: statusPayload,
-    [requestType.value === 'return' ? 'returnReason' : 'replacementReason']: requestReason.value.trim(),
+    [requestType.value === 'return' ? 'returnReason' : 'replacementReason']: note,
     returnRequestedItems: selectedReturnItems.value
   }
 
   try {
-    await updateOrderStatus(selectedOrder.value.id, updateFields)
+    if (requestType.value === 'return') {
+      // Use the FSM endpoint so a history entry is recorded for customer-care.
+      try {
+        await requestReturnFSM(selectedOrder.value.id, note)
+      } catch (fsmErr) {
+        // If the FSM endpoint rejects (e.g. status not 'delivered'),
+        // do not fall back silently — surface the message.
+        throw fsmErr
+      }
+      // Persist the items list + reason alongside (matches existing fields).
+      await updateOrderStatus(selectedOrder.value.id, {
+        returnReason: note,
+        returnRequestedItems: selectedReturnItems.value
+      })
+    } else {
+      await updateOrderStatus(selectedOrder.value.id, updateFields)
+    }
     alert(`Your ${requestType.value} request has been submitted successfully.`)
     showRequestForm.value = false
-  } catch(e) { alert("Request crashed: " + e.message) } 
+  } catch(e) { alert("Request crashed: " + e.message) }
   finally { processingAction.value = false }
 }
 
@@ -377,6 +415,23 @@ const closeOrderModal = () => { selectedOrder.value = null; showRequestForm.valu
               </div>
             </div>
 
+            <!-- Pickup mode banner — shown only when admin has set pickupMode on the order -->
+            <div v-if="pickupGuidance(selectedOrder)" class="alert-strip" :class="pickupGuidance(selectedOrder).tone">
+              <strong>{{ pickupGuidance(selectedOrder).icon }} {{ pickupGuidance(selectedOrder).title }}</strong>
+              <p style="margin: 6px 0 0; font-size: 12px;">{{ pickupGuidance(selectedOrder).body }}</p>
+              <div v-if="pickupGuidance(selectedOrder).showAddress" class="warehouse-card">
+                <div class="warehouse-line"><strong>{{ WAREHOUSE_ADDRESS.name }}</strong></div>
+                <div>{{ WAREHOUSE_ADDRESS.line1 }}</div>
+                <div>{{ WAREHOUSE_ADDRESS.line2 }}</div>
+                <div>{{ WAREHOUSE_ADDRESS.country }} – <strong>PIN {{ WAREHOUSE_ADDRESS.pincode }}</strong></div>
+                <div>📞 {{ WAREHOUSE_ADDRESS.phone }}</div>
+                <div class="warehouse-note">🕐 {{ WAREHOUSE_ADDRESS.hours }}</div>
+                <div class="warehouse-note">📍 {{ WAREHOUSE_ADDRESS.landmark }}</div>
+                <div class="warehouse-note">⚠️ {{ WAREHOUSE_ADDRESS.note }}</div>
+                <button class="btn-primary" style="margin-top: 10px;" @click="copyWarehouseAddr">📋 Copy Address</button>
+              </div>
+            </div>
+
             <!-- Alerts -->
             <div v-if="['cancelled_refund_pending', 'returned_refund_pending'].includes(selectedOrder.shippingStatus)" class="alert-strip">
               💸 <strong>Refund Pending:</strong> Being processed to original payment method.
@@ -473,12 +528,6 @@ const closeOrderModal = () => { selectedOrder.value = null; showRequestForm.valu
                   <button class="btn-primary w-100" @click="submitReverseLogisticsRequest" :disabled="processingAction">Submit</button>
                 </div>
               </div>
-
-              <!-- Raw order data dump (visible at end of modal — useful when fields are missing) -->
-              <details class="raw-json-block">
-                <summary>🔍 Raw order data (JSON)</summary>
-                <pre>{{ formatRaw(selectedOrder) }}</pre>
-              </details>
 
             </div>
           </div>
@@ -613,6 +662,12 @@ const closeOrderModal = () => { selectedOrder.value = null; showRequestForm.valu
 .alert-strip { background: #FFF7ED; border: 1px dashed #FDBA74; padding: 12px; border-radius: 8px; color: #C2410C; font-size: 13px; }
 .alert-strip.error { background: #FEF2F2; border-color: #FCA5A5; color: #DC2626; }
 .alert-strip.info { background: #EFF6FF; border-color: #BFDBFE; color: #1E40AF; }
+.alert-strip.success { background: #ECFDF5; border-color: #6EE7B7; color: #065F46; }
+
+/* Warehouse-address card nested in pickup-mode alert */
+.warehouse-card { margin-top: 10px; padding: 12px; border-radius: 6px; background: #FFFFFF; border: 1px dashed #6EE7B7; font-size: 13px; color: #0F172A; line-height: 1.6; }
+.warehouse-line { font-weight: 600; }
+.warehouse-note { font-size: 11px; color: #64748B; margin-top: 4px; }
 
 .modal-items-list { border: 1px solid #E2E8F0; border-radius: 8px; padding: 16px; }
 .m-item { display: flex; gap: 12px; align-items: center; padding-bottom: 12px; border-bottom: 1px dashed #E2E8F0; margin-bottom: 12px; }
@@ -662,12 +717,6 @@ const closeOrderModal = () => { selectedOrder.value = null; showRequestForm.valu
 .return-checkbox-label input { accent-color: #0F172A; }
 .clean-input { width: 100%; border: 1px solid #CBD5E1; border-radius: 6px; padding: 10px; font-family: inherit; font-size: 13px; outline: none; resize: none; height: 80px; box-sizing: border-box;}
 .clean-input:focus { border-color: #0F172A; }
-
-/* Raw JSON dump */
-.raw-json-block { margin-top: 18px; padding: 12px; background: #0F172A; color: #E2E8F0; border-radius: 8px; font-size: 11px; }
-.raw-json-block summary { cursor: pointer; font-size: 12px; font-weight: 600; color: #E2E8F0; padding: 2px 0; user-select: none; }
-.raw-json-block summary:hover { color: #38BDF8; }
-.raw-json-block pre { margin: 10px 0 0; padding: 10px; background: #1E293B; border-radius: 6px; max-height: 280px; overflow: auto; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, monospace; font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; color: #CBD5E1; }
 
 .btn-danger { background: #DC2626; border-color: #DC2626; color: white; padding: 10px 16px; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; border: 1px solid transparent; font-family: inherit; transition: 0.2s; }
 .btn-danger:hover { background: #B91C1C; }

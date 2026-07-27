@@ -32,6 +32,7 @@ layout.vue
 # Test files
 test-sa*.cjs
 test-sa*.js
+firestore.rules
 
 # Environment variables
 .dev.vars
