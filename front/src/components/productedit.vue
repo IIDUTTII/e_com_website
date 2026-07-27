@@ -109,9 +109,17 @@ const addVariant = () => {
 }
 const removeVariant = (idx) => { form.value.variants.splice(idx, 1) }
 
-// Toggle variant active status
-const toggleVariantActive = (idx) => {
-  form.value.variants[idx].active = !form.value.variants[idx].active
+// Per-variant inline editing (price + stock; id and label are immutable)
+const editingVariantIdx = ref(null)
+const startEditVariant = (idx) => { editingVariantIdx.value = idx }
+const cancelEditVariant = () => { editingVariantIdx.value = null }
+const saveVariantEdits = () => {
+  // Normalize types right before saving the form
+  for (const v of form.value.variants) {
+    if (v.price !== '' && v.price !== null && v.price !== undefined) v.price = Number(v.price)
+    if (v.stock !== '' && v.stock !== null && v.stock !== undefined) v.stock = Number(v.stock)
+  }
+  editingVariantIdx.value = null
 }
 
 const handleLocalImageUpload = async (event) => {
@@ -165,9 +173,26 @@ const handleSubmit = async () => {
     return;
   }
 
+  // Final normalization: every variant has a numeric price and stock
+  const errors = [];
+  const normalizedVariants = form.value.variants.map(v => {
+    const price = Number(v.price);
+    const stock = Number(v.stock);
+    if (!Number.isFinite(price) || price < 0) errors.push(`${v.label || v.variantId || 'Variant'}: invalid price`);
+    if (!Number.isInteger(stock) || stock < 0) errors.push(`${v.label || v.variantId || 'Variant'}: invalid stock`);
+    return {
+      ...v,
+      price: Number.isFinite(price) ? price : 0,
+      stock: Number.isInteger(stock) ? stock : 0,
+      active: v.active !== false,
+      variantId: v.variantId || v.label?.toLowerCase().replace(/[^a-z0-9]+/g, '-') || '',
+    };
+  });
+  if (errors.length) { alert('Please fix variants:\n• ' + errors.join('\n• ')); return; }
+
   saving.value = true
   const clean = (arr) => (arr || []).filter(v => v?.trim())
-  
+
   const payload = {
     name: form.value.name, shortDesc: form.value.shortDesc, description: form.value.description,
     category: form.value.category, priorityOrder: Number(form.value.priorityOrder),
@@ -177,15 +202,15 @@ const handleSubmit = async () => {
     createdBy: form.value.createdBy, imageUrls: clean(form.value.imageUrls),
     benefits: clean(form.value.benefits), ingredients: clean(form.value.ingredients),
     tags: clean(form.value.tags), origin: form.value.origin, howToUse: form.value.howToUse, shelfLife: form.value.shelfLife,
-    variants: form.value.variants, updatedAt: new Date()
-    // NO 'stock' at product level – removed
+    variants: normalizedVariants, updatedAt: new Date()
   }
   
   try {
-    if (isEditing.value) { await updateProduct(rawId.value, payload) } 
+    if (isEditing.value) { await updateProduct(rawId.value, payload) }
     else { await addProduct(payload) }
+    editingVariantIdx.value = null
     router.push('/admin')
-  } catch (e) { alert('Error saving: ' + e.message) } 
+  } catch (e) { alert('Error saving: ' + e.message) }
   finally { saving.value = false }
 }
 </script>
@@ -235,15 +260,30 @@ const handleSubmit = async () => {
                  <button type="button" class="btn-outline-add" @click="addVariant">Add</button>
              </div>
              <div class="variants-list" v-if="form.variants.length > 0">
-                 <div class="v-badge" v-for="(v, i) in form.variants" :key="i">
-                     <strong>{{v.type}}:</strong> {{v.label}} 
-                     (₹{{v.price}}) 
-                     <span class="variant-stock">Stock: {{v.stock}}</span>
-                     <label class="variant-active-toggle">
-                       <input type="checkbox" v-model="v.active" @change="toggleVariantActive(i)" />
-                       Active
-                     </label>
-                     <button type="button" @click="removeVariant(i)" class="remove-variant-btn">✕</button>
+                 <div class="v-badge" v-for="(v, i) in form.variants" :key="v.variantId || i">
+                     <div class="v-static-fields">
+                       <strong>{{v.type}}:</strong> {{v.label}}
+                       <span class="v-immutable-chip" :title="`Variant ID is immutable: ${v.variantId}`">ID: {{ v.variantId }}</span>
+                     </div>
+
+                     <template v-if="editingVariantIdx === i">
+                       <label>Price (₹)<input type="number" min="0" step="0.01" v-model.number="v.price" /></label>
+                       <label>Stock<input type="number" min="0" step="1" v-model.number="v.stock" /></label>
+                       <label class="variant-active-toggle">
+                         <input type="checkbox" v-model="v.active" />
+                         Active
+                       </label>
+                       <button type="button" class="v-save" @click="saveVariantEdits">Save</button>
+                       <button type="button" class="v-cancel" @click="cancelEditVariant">Cancel</button>
+                     </template>
+
+                     <template v-else>
+                       <span :class="['v-pill', v.active ? 'pill-green' : 'pill-amber']">₹{{ v.price }}</span>
+                       <span :class="['v-pill', (Number(v.stock) || 0) > 0 ? 'pill-green' : 'pill-amber']">Stock: {{ v.stock }}</span>
+                       <span :class="['v-pill', v.active ? 'pill-green' : 'pill-amber']">{{ v.active ? 'Active' : 'Hidden' }}</span>
+                       <button type="button" class="v-edit" @click="startEditVariant(i)">Edit</button>
+                       <button type="button" @click="removeVariant(i)" class="remove-variant-btn">✕</button>
+                     </template>
                  </div>
              </div>
              <p v-else style="color:#dc2626; font-size:0.85rem; font-weight: 500; margin-top: 10px;">Note: You must add at least one variant.</p>
@@ -340,11 +380,22 @@ const handleSubmit = async () => {
 .v-select, .v-input { padding: 10px; border-radius: 6px; border: 1px solid #cbd5e1; font-family: inherit; font-size: 13px; flex:1; min-width:80px; }
 .v-select:focus, .v-input:focus { border-color: #0f172a; outline: none; }
 .btn-outline-add { background: white; border: 1px solid #cbd5e1; padding: 10px 16px; border-radius: 6px; font-size: 13px; font-weight: 500; cursor: pointer; color: #334155; white-space:nowrap; }
-.variants-list { display: flex; flex-wrap: wrap; gap: 10px; }
-.v-badge { background: #ffffff; border: 1px solid #e2e8f0; padding: 6px 12px; border-radius: 6px; font-size: 13px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.variants-list { display: flex; flex-direction: column; gap: 8px; }
+.v-badge { background: #ffffff; border: 1px solid #e2e8f0; padding: 8px 12px; border-radius: 8px; font-size: 13px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.v-badge > label { display: flex; flex-direction: column; font-size: 0.7rem; font-weight: 600; color: #64748b; gap: 2px; min-width: 80px; }
+.v-badge > label input { width: 80px; padding: 4px 8px; border: 1px solid #cbd5e1; border-radius: 4px; font-family: inherit; font-size: 0.95rem; color: #0f172a; font-weight: 600; }
+.v-static-fields { display: flex; gap: 6px; align-items: center; min-width: 140px; flex-wrap: wrap; }
+.v-immutable-chip { background: #f1f5f9; color: #475569; font-family: monospace; font-size: 0.7rem; padding: 2px 6px; border-radius: 3px; }
+.v-pill { padding: 3px 8px; border-radius: 4px; font-weight: 600; font-size: 0.75rem; }
+.v-pill.pill-green { background: #dcfce7; color: #166534; }
+.v-pill.pill-amber { background: #fef3c7; color: #92400e; }
+.v-edit, .v-save, .v-cancel { background: white; border: 1px solid #cbd5e1; border-radius: 4px; padding: 4px 10px; cursor: pointer; font-size: 0.75rem; font-weight: 600; color: #334155; }
+.v-save { background: #0f172a; color: #fff; border-color: #0f172a; }
+.v-cancel { color: #92400e; border-color: #fde68a; }
+.v-edit:hover { background: #f1f5f9 }
 .v-badge .variant-stock { background: #e2e8f0; padding: 0 6px; border-radius: 4px; font-weight: 600; font-size: 0.75rem; }
-.v-badge .variant-active-toggle { display: flex; align-items: center; gap: 4px; font-size: 0.75rem; }
-.v-badge .remove-variant-btn { background: #fef2f2; color: #ef4444; border: none; border-radius: 4px; width: 20px; height: 20px; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 10px; }
+.v-badge .variant-active-toggle { flex-direction: row; align-items: center; gap: 4px; font-size: 0.75rem; }
+.v-badge .remove-variant-btn { background: #fef2f2; color: #ef4444; border: none; border-radius: 4px; width: 22px; height: 22px; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 11px; }
 .list-stack { display: flex; flex-direction: column; gap: 8px; }
 .list-item-row { display: flex; gap: 8px; }
 .add-row-btn { background: #fafafa; color: #334155; border: 1px dashed #cbd5e1; padding: 10px; border-radius: 6px; cursor: pointer; font-weight: 500; font-size: 13px; }

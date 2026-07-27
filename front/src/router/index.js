@@ -32,6 +32,7 @@ const routes = [
   { path: '/product/:id',            component: ProductDetail,name: "ProductDetail",meta: { title: 'Product | PahadS' } },
   { path: '/admin', component: Admin, meta: { title: 'Admin | PahadS', requiresAdmin: true } },
   { path: '/admin/product/:id', component: ProductForm, meta: { title: 'Edit Product | PahadS', requiresAdmin: true } },
+  { path: '/admin/product/new', component: ProductForm, meta: { title: 'New Product | PahadS', requiresAdmin: true } },
   { path: '/checkout', component: checkout,meta: { title: 'Checkout | PahadS' } },
   { path: '/terms', component: Terms,meta: { title: 'Terms | PahadS' } },
   { path: '/return', component: Return,meta: { title: 'Return & Refund | PahadS' } },

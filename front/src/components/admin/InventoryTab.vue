@@ -18,6 +18,15 @@ const modalVariant = ref(null)
 const modalStock = ref('')
 const modalError = ref('')
 
+const canCreateProduct = computed(() => props.userRole === 'admin' || props.userRole === 'superadmin')
+const goCreateProduct = () => {
+  if (!canCreateProduct.value) {
+    alert('❌ ACCESS DENIED: Only Admins can create products.')
+    return
+  }
+  router.push('/admin/product/new')
+}
+
 // Flatten products into variant rows for display
 const variantRows = computed(() => {
   const rows = []
@@ -304,6 +313,15 @@ const goToProduct = (productId, productName) => router.push(`/product/${generate
       </div>
       <div class="ws-actions">
         <input v-model="searchText" class="search-input" placeholder="Search product, variant, or ID…" />
+        <button
+          v-if="canCreateProduct"
+          class="btn-new-product"
+          @click="goCreateProduct"
+          title="Create a new product"
+        >
+          <span style="font-size: 16px; line-height: 1;">＋</span>
+          <span>New Product</span>
+        </button>
       </div>
     </div>
 
@@ -562,6 +580,10 @@ const goToProduct = (productId, productName) => router.push(`/product/${generate
 .row-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .btn-outline { background: #FFFFFF; color: #0F172A; border: 1px solid #CBD5E1; padding: 6px 12px; border-radius: 6px; font-weight: 700; cursor: pointer; white-space: nowrap; font-size: 0.8rem; transition: all 0.2s; }
 .btn-outline:hover { border-color: #0F2A1F; background: #F8FAFC; }
+
+/* New-Product CTA — sits in the inventory toolbar */
+.btn-new-product { display: inline-flex; align-items: center; gap: 8px; background: #0F2A1F; color: #FFFFFF; border: 1px solid #0F2A1F; padding: 10px 18px; border-radius: 10px; font-weight: 700; cursor: pointer; font-family: inherit; font-size: 0.9rem; transition: all 0.18s; box-shadow: 0 2px 6px rgba(15, 42, 31, 0.18); }
+.btn-new-product:hover { background: #0B1F18; border-color: #0B1F18; transform: translateY(-1px); }
 .btn-edit { background: #F1F5F9; color: #0F172A; border: 1px solid #CBD5E1; padding: 6px 12px; border-radius: 6px; font-weight: 700; cursor: pointer; font-size: 0.8rem; }
 .btn-edit:hover { background: #E2E8F0; }
 
