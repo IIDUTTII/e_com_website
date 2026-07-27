@@ -253,10 +253,17 @@ const filteredOrders = computed(() => {
 
   if (searchQ.value.trim()) {
     const q = searchQ.value.toLowerCase()
-    list = list.filter(o =>
-      (o.id || '').toLowerCase().includes(q) ||
-      (o.items || []).some(item => (item.name || '').toLowerCase().includes(q))
-    )
+    list = list.filter(o => {
+      // Match by order ID, item name, customer name, phone, address.
+      const items = o.items || []
+      return (o.id || '').toLowerCase().includes(q)
+        || (o.customerName || '').toLowerCase().includes(q)
+        || (o.phone || '').toLowerCase().includes(q)
+        || (o.address || '').toLowerCase().includes(q)
+        || items.some(item =>
+          (item.name || '').toLowerCase().includes(q)
+          || (item.variant || '').toLowerCase().includes(q))
+    })
   }
 
   return list
@@ -373,7 +380,7 @@ const runAction = async (fn, statusUpdate) => {
 // fall back to the original direct-write function so the workflow still
 // works — at the cost of no history for that one action.
 /* eslint-disable no-unused-vars */
-const withHistory = async ({ fsmCall, fallbackCall, statusUpdate, expectedFailurePrefix = '' }) => {
+const withHistory = async ({ fsmCall, fallbackCall, statusUpdate }) => {
   actionBusy.value = true
   try {
     try {
@@ -383,12 +390,17 @@ const withHistory = async ({ fsmCall, fallbackCall, statusUpdate, expectedFailur
       return
     } catch (e) {
       const msg = String(e?.message || '')
+      // Only treat as a transition-permission failure (use the fallback
+      // path only for OTHER errors). Without this guard, ANY non-prefix
+      // error (e.g. HTTP 405 from a misconfigured function) would be
+      // surfaced to the admin instead of falling back to the direct
+      // Firestore write that the FSM-style endpoint was protecting.)
       const isTransitionErr =
         msg.includes('transitionNotPermitted') ||
-        msg.includes('invalidTransition') ||
-        msg.toLowerCase().startsWith(expectedFailurePrefix.toLowerCase())
+        msg.includes('invalidTransition')
       if (!isTransitionErr) {
         console.warn('FSM endpoint unavailable, falling back to direct write:', msg)
+        // fall through to fallbackCall() below
       } else {
         throw e
       }
@@ -684,7 +696,7 @@ const getOrderTimeline = (order) => {
           <div class="search-row">
             <div class="search-box">
               <span class="search-icon">🔍</span>
-              <input v-model="searchQ" placeholder="Search product or paste Order ID (Enter to lookup)…" @keyup.enter="lookupOrderById" />
+              <input v-model="searchQ" placeholder="Search by Order ID, customer name, product, phone, address…" @keyup.enter="lookupOrderById" />
               <button v-if="searchQ" class="clear-search" @click="clearSearch" title="Clear search">✕</button>
             </div>
             <button class="btn-lookup" @click="lookupOrderById" :disabled="loading || !searchQ.trim()">🔎 Lookup by ID</button>

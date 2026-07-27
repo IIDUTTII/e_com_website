@@ -12,6 +12,7 @@ defineOptions({ name: 'ProductDetail' })
 const route = useRoute(), router = useRouter()
 
 const product = ref(null), loading = ref(true), notFound = ref(false)
+const isUnavailable = computed(() => product.value && product.value.isActive === false)
 const adding = ref(false), alreadyInCart = ref(false)
 
 const activeIdx = ref(0), brokenUrls = ref(new Set())
@@ -131,6 +132,7 @@ const decreaseQty = () => { if(selectedQuantity.value > 1) selectedQuantity.valu
 async function handleAddToCart() {
   if (alreadyInCart.value) { router.push('/cart'); return }
   if (adding.value || isOutOfStock.value) return
+  if (isUnavailable.value) return  // belt-and-suspenders: never add a hidden product
   if (!selectedVariant.value) { alert("Please select an option."); return; }
 
   adding.value = true
@@ -178,6 +180,11 @@ const nextImage = () => { if(activeIdx.value < cleanImages.value.length - 1) act
     <div v-else-if="notFound" class="center-state text-404">
       <h3>Product Not Found</h3>
       <button class="primary-cta" @click="router.push('/products')">Return to Shop</button>
+    </div>
+    <div v-else-if="isUnavailable" class="center-state text-404">
+      <h3>Currently Unavailable</h3>
+      <p>This product has been temporarily paused by our team. Please check back later.</p>
+      <button class="primary-cta" @click="router.push('/products')">Browse Other Products</button>
     </div>
 
     <div v-else-if="product" class="product-viewport-container fade-in">
@@ -399,7 +406,8 @@ const nextImage = () => { if(activeIdx.value < cleanImages.value.length - 1) act
 .back-link-action { background: transparent; border: none; color: #6B7280; font-weight: 500; font-size: 14px; cursor: pointer; padding: 0; transition: color 0.2s; font-family: inherit;}
 .back-link-action:hover { color: #111827; }
 
-.center-state { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 50vh; color: #64748B; }
+.center-state { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 50vh; color: #64748B; gap: 12px; }
+.center-state p { max-width: 420px; text-align: center; color: #94a3b8; }
 .spinner { width: 36px; height: 36px; border: 3px solid #F3F4F6; border-top-color: #111827; border-radius: 50%; animation: spin 0.8s linear infinite; }
 
 .product-viewport-container { width: 100%; max-width: 1200px; margin: 0 auto; display: flex; flex-direction: column; gap: 64px; }

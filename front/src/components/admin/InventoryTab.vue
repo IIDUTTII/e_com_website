@@ -1,7 +1,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { fetchAllProducts, updateProduct, subscribeToProducts } from '../db.js'
+import { fetchAllProducts, updateProduct, subscribeToProducts, toggleProductActive } from '../db.js'
 
 const router = useRouter()
 const props = defineProps({ userRole: { type: String, default: 'user' } })
@@ -193,6 +193,18 @@ const toggleExpanded = (productId) => {
     expandedProducts.value.delete(productId)
   } else {
     expandedProducts.value.add(productId)
+  }
+}
+
+const toggleProductVisibility = async (productId, currentlyActive) => {
+  if (props.userRole !== 'superadmin' && props.userRole !== 'admin') {
+    alert('❌ ACCESS DENIED: Only Admins can change product visibility.')
+    return
+  }
+  try {
+    await toggleProductActive(productId, currentlyActive)
+  } catch (e) {
+    alert('Failed to toggle product visibility: ' + e.message)
   }
 }
 
@@ -409,6 +421,13 @@ const goToProduct = (productId, productName) => router.push(`/product/${generate
               </td>
               <td>
                 <div class="row-actions">
+                  <button
+                    class="btn-outline"
+                    :class="row.isActive ? 'btn-hide' : 'btn-publish'"
+                    @click.stop="toggleProductVisibility(row.productId, row.isActive)"
+                    :title="row.isActive ? 'Hide this product from the public storefront' : 'Publish this product to the public storefront'">
+                    {{ row.isActive ? '🙈 Hide' : '🟢 Publish' }}
+                  </button>
                   <button class="btn-outline" @click.stop="toggleExpanded(row.productId)">
                     {{ expandedProducts.has(row.productId) ? 'Hide variants' : 'View variants' }}
                   </button>
@@ -578,6 +597,10 @@ const goToProduct = (productId, productName) => router.push(`/product/${generate
 .status-pill.stock-ok { background: #F0FDF4; color: #16A34A; border: 1px solid #BBF7D0; }
 
 .row-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.btn-hide { color: #b45309; border-color: #fcd34d; }
+.btn-hide:hover { background: #fef3c7; }
+.btn-publish { color: #047857; border-color: #6ee7b7; font-weight: 600; }
+.btn-publish:hover { background: #d1fae5; }
 .btn-outline { background: #FFFFFF; color: #0F172A; border: 1px solid #CBD5E1; padding: 6px 12px; border-radius: 6px; font-weight: 700; cursor: pointer; white-space: nowrap; font-size: 0.8rem; transition: all 0.2s; }
 .btn-outline:hover { border-color: #0F2A1F; background: #F8FAFC; }
 

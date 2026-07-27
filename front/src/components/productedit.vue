@@ -13,10 +13,14 @@ const existingCategories = ref(['Spices & Herbs', 'Ghee & Oils', 'Organic Sweets
 
 const getDefaultForm = () => ({
   name: '', shortDesc: '', description: '', category: 'Spices & Herbs', priorityOrder: 99,
-  isActive: false, discount: { isDiscounted: false, percent: 0 },
-  reviewCount: 0, ratingAverage: 0.0, createdBy: 'ADMIN_USER', 
+  // Newly created products are ACTIVE by default — the admin can hide
+  // them from the form's "Visible to customers" switch if they're
+  // drafting. Without this default every new product lands hidden and
+  // is unreachable from the storefront unless the admin flips it.
+  isActive: true, discount: { isDiscounted: false, percent: 0 },
+  reviewCount: 0, ratingAverage: 0.0, createdBy: 'ADMIN_USER',
   imageUrls: [], benefits: [''], ingredients: [''], origin: '', howToUse: '', shelfLife: '', tags: [''],
-  variants: [] 
+  variants: []
 })
 
 const form = ref(getDefaultForm())
@@ -245,6 +249,19 @@ const handleSubmit = async () => {
           <div class="input-group"><label>Display Priority (1=Top)</label><input v-model="form.priorityOrder" type="number" /></div>
           <div class="input-group"><label>Shelf Life</label><input v-model="form.shelfLife" placeholder="e.g., 12 Months" /></div>
 
+          <div class="input-group full-width visibility-toggle"
+               :class="form.isActive ? 'is-visible' : 'is-hidden'">
+            <label class="visibility-label">
+              <input type="checkbox" v-model="form.isActive" />
+              <span class="visibility-label-text">
+                <strong>{{ form.isActive ? '👁️ Visible to customers' : '🚫 Hidden from customers' }}</strong>
+                <small>{{ form.isActive
+                  ? 'Product is live on the storefront and can be ordered.'
+                  : 'Product is hidden from /products and from any direct URL. Customers will see "Currently unavailable" if they navigate to it.' }}</small>
+              </span>
+            </label>
+          </div>
+
           <div class="divider full-width">Variants & Pricing (Each variant has its own stock)</div>
           <div class="full-width variants-builder-box">
              <div class="variants-row input-row">
@@ -425,6 +442,14 @@ const handleSubmit = async () => {
 .action-btn:last-child { border-right: none; }
 .action-btn:hover { background: #f1f5f9; }
 .text-danger { color: #ef4444; }
+
+.visibility-toggle { padding: 14px 16px; border-radius: 10px; border: 1px solid; transition: 0.2s; }
+.visibility-toggle.is-visible { background: #ECFDF5; border-color: #6EE7B7; }
+.visibility-toggle.is-hidden  { background: #FEF2F2; border-color: #FCA5A5; }
+.visibility-label { display: flex; gap: 12px; align-items: flex-start; cursor: pointer; }
+.visibility-label input[type='checkbox'] { width: 18px; height: 18px; margin-top: 3px; cursor: pointer; }
+.visibility-label-text { display: flex; flex-direction: column; gap: 4px; }
+.visibility-label-text small { color: #475569; font-size: 0.78rem; font-weight: 400; }
 
 @media (max-width: 768px) {
   .form-workspace-page { padding: 80px 16px 40px; }
