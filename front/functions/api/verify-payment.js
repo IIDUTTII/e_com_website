@@ -88,9 +88,30 @@ export async function onRequest(context) {
     }
 
     // ─── 2b. OBTAIN SERVICE ACCOUNT TOKEN (used for Firestore reads/writes that bypass rules) ───
-    const accessToken = await getServiceAccountToken(env);
+    // Service Account is the ONLY writer that can land records in
+    // /payments, /payment_audit, /payment_failure_logs, and /orders
+    // because those rules are `allow write: if false`. If SA fails
+    // here we surface the failure to the user immediately — there is
+    // no safe idToken fallback for financial records.
+    let accessToken;
+    try {
+      accessToken = await getServiceAccountToken(env);
+    } catch (err) {
+      console.error('❌ Service Account auth failed:', err.message);
+      return new Response(
+        JSON.stringify({
+          error: 'Payment processing is temporarily unavailable. Your order will be reviewed manually by our team.',
+          errorStage: 'service_account_unavailable',
+          orderId: orderId || null,
+          razorpayPaymentId: razorpay_payment_id || null,
+        }),
+        { status: 500, headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' } }
+      );
+    }
 
     // ─── 3. IMMEDIATE INDEPENDENT AUDIT LOG (BEFORE ANY TRANSACTION) ───
+    // Server-only write via Service Account token. If SA is unavailable,
+    // the early-exit above already answered the user — we never get here.
     const auditId = razorpay_payment_id || `pay_${Date.now()}`;
     const auditData = {
       razorpayPaymentId: razorpay_payment_id,
@@ -482,9 +503,11 @@ export async function onRequest(context) {
   } catch (err) {
     console.error('❌ verify-payment exception:', err);
 
-    // ─── WRITE STRUCTURED FAILURE LOG ───
-    // Always write a paper trail so the real failure is visible to admins.
-    // Try service-account token first (db-wide write), fall back to idToken.
+    // ─── WRITE STRUCTURED FAILURE LOG (Service Account only) ───
+    // Service Account bypasses `allow write: if false` so the failure log
+    // *can* still be written here even if downstream writes failed. We
+    // never fall back to user idToken — a failure log written by the
+    // user would create a false-positive audit trail.
     const failureId = `fail_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const failurePayload = toFirestoreDocumentFields({
       failureId,
@@ -498,67 +521,43 @@ export async function onRequest(context) {
       stage: isSignatureVerified ? 'post_signature_verify' : 'pre_signature_verify',
     });
 
-    let loggedVia = 'none';
     try {
-      let writeToken = null;
-      try {
-        writeToken = typeof accessToken !== 'undefined' && accessToken ? accessToken : null;
-      } catch (_) { /* ignore */ }
-      if (!writeToken) {
-        try { writeToken = await getServiceAccountToken(env); loggedVia = 'service_account'; }
-        catch (_) {
-          const authHeader = request.headers.get('Authorization');
-          if (authHeader?.startsWith('Bearer ')) {
-            writeToken = authHeader.split(' ')[1];
-            loggedVia = 'id_token';
-          }
-        }
-      } else {
-        loggedVia = 'service_account';
-      }
-      if (writeToken) {
+      // Step 2b issued either a real SA token (used here) or returned
+      // an early 500 (we'd never reach this catch). If for some reason
+      // the token has expired mid-request, fall through silently —
+      // surfacing a second token error would mask the original cause.
+      if (accessToken) {
         const failCreateUrl = `https://firestore.googleapis.com/v1/projects/${firebaseProjectId}/databases/(default)/documents/payment_failure_logs?documentId=${encodeURIComponent(failureId)}`;
         const logRes = await fetch(failCreateUrl, {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${writeToken}`,
+            'Authorization': `Bearer ${accessToken}`,
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({ fields: failurePayload }),
         });
-        console.log(`📝 Failure log written (id=${failureId}, via=${loggedVia}, status=${logRes.status})`);
+        console.log(`📝 Failure log written (id=${failureId}, status=${logRes.status})`);
+      } else {
+        console.error('⚠️ Failure log skipped: SA token not available in this scope');
       }
     } catch (logErr) {
       console.error('❌ Could not write failure log:', logErr.message);
     }
 
     // ─── REAL FAILURE — DO NOT SILENTLY SUCCEED ───
-    // Previously this path returned { verified: true } after a verified payment,
-    // which masked downstream Firestore write failures and made the user think
-    // payment succeeded even when nothing was written to the orders collection.
-    // We surface the real error to the front-end and let the user / admin
-    // decide how to reconcile (refund, retry, manual fix).
-    if (isSignatureVerified) {
-      return new Response(
-        JSON.stringify({
-          error: `Payment verified on Razorpay but downstream update failed: ${err.message}`,
-          errorStage: 'post_signature_verify',
-          debugId: failureId,
-          orderId: orderId || null,
-          razorpayPaymentId: razorpay_payment_id || null,
-        }),
-        {
-          status: 500,
-          headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
-        }
-      );
-    }
-
+    // Sanitize the message before sending it to the client. We never
+    // echo env-var names, stack frames, or internal config strings
+    // back to the browser — admins read the failure log via Firestore.
+    const clientMessage = isSignatureVerified
+      ? 'Payment was successful on Razorpay, but order finalization failed on our side. Our team has been notified and will reconcile shortly.'
+      : 'We could not finalize this payment. No money has been charged — please try again or use another method.';
     return new Response(
       JSON.stringify({
-        error: err.message,
-        errorStage: 'pre_signature_verify',
+        error: clientMessage,
+        errorStage: isSignatureVerified ? 'post_signature_verify' : 'pre_signature_verify',
         debugId: failureId,
+        orderId: orderId || null,
+        razorpayPaymentId: razorpay_payment_id || null,
       }),
       {
         status: 500,

@@ -100,7 +100,12 @@ async function getUserRole(uid, env, idToken) {
 }
 
 async function getServiceAccountToken(env) {
-  const privateKey = env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n');
+  // Some .dev.vars edits wrap the key in literal `"..."`; strip those so
+  // PEM boundaries are clean before we strip whitespace for base64 decode.
+  const privateKey = String(env.FIREBASE_PRIVATE_KEY || '')
+    .replace(/^"|"$/g, '')
+    .replace(/^'|'$/g, '')
+    .replace(/\\n/g, '\n');
   const clientEmail = env.FIREBASE_CLIENT_EMAIL;
 
   function base64url(str) {

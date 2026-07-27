@@ -3,35 +3,23 @@ import { ref, computed, onMounted, watch } from 'vue'
 import { db, auth } from '../firebase.js'
 import { onAuthStateChanged } from 'firebase/auth'
 import { doc, onSnapshot } from 'firebase/firestore'
-import { saveCartItems, fetchCoupons, fetchShippingConfig, fetchCartItemsStock } from './db.js'
+import { saveCartItems, fetchCoupons, fetchShippingConfig, fetchLiveCartItems } from './db.js'
 
 defineOptions({ name: 'CartView' })
 
-const cartItems = ref([]), loading = ref(true), currentUser = ref(null)
+const cartItems = ref([]), liveItems = ref([]), loading = ref(true), currentUser = ref(null)
 const promoCode = ref(''), promoApplied = ref(false), promoError = ref('')
 const activeCoupons = ref([]), appliedCoupon = ref(null)
 const shippingConfig = ref({ fee: 60, freeThreshold: 499, isFreeShippingActive: true })
-const stockMap = ref(new Map())
-const stockLoading = ref(false)
-
-async function refreshStock() {
-  if (!cartItems.value.length) { stockMap.value = new Map(); return }
-  stockLoading.value = true
-  try {
-    stockMap.value = await fetchCartItemsStock(cartItems.value)
-  } catch (e) { console.warn('Stock refresh failed:', e) }
-  finally { stockLoading.value = false }
-}
-
-// Watch cart items changes to refresh stock
-watch(cartItems, () => { refreshStock() }, { deep: true })
 
 onMounted(() => {
   onAuthStateChanged(auth, async (user) => {
     currentUser.value = user
     if (user) {
-      onSnapshot(doc(db, 'carts', user.uid), (snap) => {
-        cartItems.value = snap.exists() ? (snap.data().items ?? []) : []
+      onSnapshot(doc(db, 'carts', user.uid), async (snap) => {
+        const items = snap.exists() ? (snap.data().items ?? []) : []
+        cartItems.value = items
+        liveItems.value = await fetchLiveCartItems(items)
         loading.value = false
       })
       try {
@@ -44,8 +32,11 @@ onMounted(() => {
 })
 
 function getItemStockInfo(item) {
-  const key = `${item.productId}::${item.variant || item.weight || 'Standard'}`
-  return stockMap.value.get(key) || null
+  return liveItems.value.find(li =>
+    li.productId === item.productId &&
+    (li.variantId === (item.variantId || item.variant || item.weight || 'Standard') ||
+     li.variantLabel === (item.variant || item.weight || 'Standard'))
+  ) || null
 }
 
 function isItemOutOfStock(item) {
@@ -64,7 +55,12 @@ function getStockLabel(item) {
   return ''
 }
 
-const subtotal = computed(() => cartItems.value.reduce((s, i) => s + i.price * i.quantity, 0))
+const displayItems = computed(() => cartItems.value.map(ci => {
+  const live = liveItems.value.find(li => li.productId === ci.productId && (li.variantId === (ci.variantId || ci.variant || ci.weight || 'Standard') || li.variantLabel === (ci.variant || ci.weight || 'Standard')))
+  return live ? { ...ci, price: live.price ?? ci.price, name: live.name ?? ci.name, imageUrl: live.imageUrl ?? ci.imageUrl } : ci
+}))
+
+const subtotal = computed(() => displayItems.value.reduce((s, i) => s + i.price * i.quantity, 0))
 const totalItemCount = computed(() => cartItems.value.reduce((s, i) => s + i.quantity, 0))
 
 const discountAmount = computed(() => {
@@ -155,7 +151,7 @@ const clearVoucher = () => {
 
           <!-- Single box for all items -->
           <div class="cart-items-wrapper">
-            <div v-for="(item, idx) in cartItems" :key="idx" :class="['cart-item-row', { 'out-of-stock-row': isItemOutOfStock(item) }]">
+            <div v-for="(item, idx) in displayItems" :key="idx" :class="['cart-item-row', { 'out-of-stock-row': isItemOutOfStock(item) }]">
               
               <!-- Image (no emoji fallback) -->
               <router-link :to="`/product/${item.slug || 'product'}--${item.productId}`" class="item-img-link">
