@@ -1,13 +1,17 @@
 <script setup>
 import { ref, computed, watch, onUnmounted, onMounted } from 'vue'
 import { db } from '../../firebase.js'
-import { collection, query, orderBy, onSnapshot, limit } from 'firebase/firestore'
+import { collection, query, orderBy, onSnapshot, limit, getDoc, doc } from 'firebase/firestore'
 import {
   confirmOrderInDb, rejectOrderInDb, shipOrderInDb, markOrderDeliveredInDb,
   processRefundInDb, approveReturnInDb, rejectReturnInDb,
   approveReplacementInDb, markReplacedInDb, rejectReplacementInDb,
   approveRefund, rejectRefund, completeRefund,
-  formatOrderStatus
+  formatOrderStatus,
+  approveOrder, shipOrder, deliverOrder, cancelOrderFSM, markRefundedFSM,
+  approveReturnFSM, rejectReturnFSM, requestReturnFSM, fetchOrderHistory,
+  approveReplacementFSM, markReplacedFSM, rejectReplacementFSM,
+  fetchUserProfile, setPickupModeForOrder, WAREHOUSE_ADDRESS,
 } from '../db.js'
 
 const props = defineProps({ userRole: { type: String, default: 'user' } })
@@ -19,13 +23,27 @@ const dateFilter = ref('')
 const selected = ref(null)
 const loading = ref(false)
 const error = ref('')
-const loadLimit = ref(15)
+const lookupNote = ref('')
+/* Orders that the admin manually looked up by ID, kept as full
+   objects so they survive the next onSnapshot refresh and the row
+   never disappears from the table. Keyed by id for dedup. */
+const pinnedOrders = ref(new Map())
+const loadLimit = ref(50)
 const hasMore = ref(false)
 
 const rejectionComment = ref('')
 const trackingId = ref('')
 const returnRejectReason = ref('')
 const actionBusy = ref(false)
+const refundTxnId = ref('')
+const refundNote = ref('')
+const refundDateInput = ref('')
+const orderHistoryList = ref([])
+const orderHistoryLoading = ref(false)
+const orderUserProfile = ref(null)
+const orderUserProfileLoading = ref(false)
+const pickupChoiceNote = ref('')
+const pickupChoiceBusy = ref(false)
 let _unsub = null
 
 /* ─── Robust Date Parser ───
@@ -82,19 +100,47 @@ function subscribeOrders() {
   loading.value = true
   error.value = ''
 
-  /* Query by __name__ (doc ID) to avoid mixed-type index issues.
-     This guarantees ALL orders are fetched. For auto-generated IDs
-     this is roughly newest-first. We re-sort client-side below.   */
+  /* Sort by createdAt descending so the visible list is actually
+     newest-first. Single-field descending index is auto-created by
+     Firestore, so no manual index is required unless you're using a
+     compound query.
+     If createdAt is missing on legacy orders they sort last (Firestore
+     puts nulls last on desc). */
   const q = query(
     collection(db, 'orders'),
-    orderBy('__name__', 'desc'),
+    orderBy('createdAt', 'desc'),
     limit(loadLimit.value)
   )
 
   _unsub = onSnapshot(q, snap => {
     const docs = snap.docs.map(d => ({ id: d.id, ...d.data() }))
-    // Re-sort the fetched batch by updatedAt / createdAt for display
-    docs.sort((a, b) => getSortTime(b) - getSortTime(a))
+    // Tiebreaker: legacy orders without timestamps sink to bottom;
+    // identical timestamps break by ID (newest ID convention first).
+    docs.sort((a, b) => {
+      const ta = getSortTime(a) || 0
+      const tb = getSortTime(b) || 0
+      if (tb !== ta) return tb - ta
+      return (b.id || '').localeCompare(a.id || '')
+    })
+
+    /* Merge in any pinned orders (manually looked up by ID) that the
+       snapshot didn't include. The pinned orders Map already holds the
+       full data so no re-fetch is needed. */
+    const seen = new Set(docs.map(d => d.id))
+    for (const [id, pinned] of pinnedOrders.value) {
+      if (!seen.has(id)) docs.unshift(pinned)
+      else {
+        /* Keep pinned copy up to date if the snapshot brought newer fields. */
+        const i = docs.findIndex(d => d.id === id)
+        if (i >= 0) Object.assign(pinned, docs[i])
+      }
+    }
+    docs.sort((a, b) => {
+      const ta = getSortTime(a) || 0
+      const tb = getSortTime(b) || 0
+      if (tb !== ta) return tb - ta
+      return (b.id || '').localeCompare(a.id || '')
+    })
     ordersList.value = docs
     hasMore.value = snap.docs.length >= loadLimit.value
     loading.value = false
@@ -110,23 +156,96 @@ function subscribeOrders() {
   })
 }
 
+/* Direct order-by-ID lookup. Bypasses the load-limit so we don't
+   need to click "Load more" 3-4 times to find an old order.
+   The order is PINNED (added to pinnedOrders) so the next onSnapshot
+   does not evict it from the table. */
+const lookupOrderById = async () => {
+  const id = searchQ.value.trim()
+  if (!id || id.length < 3) {
+    lookupNote.value = 'Type at least 3 characters to lookup.'
+    return
+  }
+  lookupNote.value = ''
+  loading.value = true
+  try {
+    const snap = await getDoc(doc(db, 'orders', id))
+    if (!snap.exists()) {
+      lookupNote.value = `No order exists with ID "${id}".`
+      return
+    }
+    const order = { id: snap.id, ...snap.data() }
+    const idx = ordersList.value.findIndex(o => o.id === id)
+    if (idx === -1) ordersList.value.unshift(order)
+    else ordersList.value[idx] = order
+    /* Pin so the next snapshot refresh keeps it in the list. */
+    pinnedOrders.value.set(id, order)
+    selected.value = order
+    error.value = ''
+  } catch (e) {
+    lookupNote.value = 'Lookup failed: ' + e.message
+  } finally {
+    loading.value = false
+  }
+}
+
+const clearSearch = () => {
+  searchQ.value = ''
+  lookupNote.value = ''
+}
+
+const unpinOrder = (id) => {
+  pinnedOrders.value.delete(id)
+}
+
 onUnmounted(() => {
   if (_unsub) _unsub()
   window.removeEventListener('apply-order-filter', onFilterEvent)
 })
+
+// At-a-glance counts for the quick tiles above the table. These
+// reflect only the orders currently loaded into the client (limited
+// by loadLimit). They are not full counts.
+const isActionNeeded = (o) => {
+  const s = o.shippingStatus
+  return s === 'return_requested'
+    || s === 'replacement_requested'
+    || s === 'replacement_approved'
+    || s === 'returned_refund_pending'
+    || o.refund_status === 'requested'
+}
+const countActionNeeded = computed(() => ordersList.value.filter(isActionNeeded).length)
+const countReturnReq = computed(() => ordersList.value.filter(o => o.shippingStatus === 'return_requested').length)
+const countReplaceReq = computed(() => ordersList.value.filter(o => o.shippingStatus === 'replacement_requested').length)
+const countRefundReq = computed(() => ordersList.value.filter(o => o.refund_status === 'requested').length)
 
 const filteredOrders = computed(() => {
   let list = ordersList.value
 
   if (activeFilter.value === 'pending') list = list.filter(o => o.shippingStatus === 'pending')
   else if (activeFilter.value === 'confirmed') list = list.filter(o => o.shippingStatus === 'confirmed')
+  else if (activeFilter.value === 'packed') list = list.filter(o => o.shippingStatus === 'packed')
   else if (activeFilter.value === 'shipped') list = list.filter(o => o.shippingStatus === 'shipped')
   else if (activeFilter.value === 'delivered') list = list.filter(o => o.shippingStatus === 'delivered')
-  else if (activeFilter.value === 'returns') list = list.filter(o => ['return_requested', 'returned_refund_pending', 'replacement_requested', 'replacement_approved', 'replaced'].includes(o.shippingStatus))
+  else if (activeFilter.value === 'return_requested')   list = list.filter(o => o.shippingStatus === 'return_requested')
+  else if (activeFilter.value === 'replacement_requested') list = list.filter(o => o.shippingStatus === 'replacement_requested')
+  else if (activeFilter.value === 'replacement_approved')  list = list.filter(o => o.shippingStatus === 'replacement_approved')
+  else if (activeFilter.value === 'replaced')              list = list.filter(o => o.shippingStatus === 'replaced')
+  else if (activeFilter.value === 'returned_refund')       list = list.filter(o => o.shippingStatus === 'returned_refund_pending')
+  else if (activeFilter.value === 'returns_combined') list = list.filter(o => ['return_requested', 'returned_refund_pending', 'replacement_requested', 'replacement_approved', 'replaced'].includes(o.shippingStatus))
   else if (activeFilter.value === 'cancelled') list = list.filter(o => ['rejected', 'cancelled', 'cancelled_refund_pending', 'refunded'].includes(o.shippingStatus))
   else if (activeFilter.value === 'refund_requested') list = list.filter(o => o.refund_status === 'requested')
   else if (activeFilter.value === 'refund_approved') list = list.filter(o => o.refund_status === 'approved')
   else if (activeFilter.value === 'refund_completed') list = list.filter(o => o.refund_status === 'completed')
+  else if (activeFilter.value === 'action_needed') list = list.filter(o => {
+    // Customer is waiting on us → surfaced at the top of admin's queue.
+    const s = o.shippingStatus
+    return s === 'return_requested'
+      || s === 'replacement_requested'
+      || s === 'replacement_approved'
+      || s === 'returned_refund_pending'
+      || o.refund_status === 'requested'
+  })
 
   if (dateFilter.value) {
     list = list.filter(o => getOrderDateInputValue(o) === dateFilter.value)
@@ -148,10 +267,80 @@ const openOrder = (o) => {
   rejectionComment.value = ''
   trackingId.value = ''
   returnRejectReason.value = ''
+  refundTxnId.value = ''
+  refundNote.value = ''
+  refundDateInput.value = new Date().toISOString().slice(0, 10)
+  pickupChoiceNote.value = ''
+  loadHistory(o.id)
+  loadOrderUserProfile(o)
 }
 
 const closeOrder = () => {
   selected.value = null
+  orderHistoryList.value = []
+  orderUserProfile.value = null
+}
+
+const loadOrderUserProfile = async (order) => {
+  if (!order?.userId) {
+    orderUserProfile.value = null
+    return
+  }
+  orderUserProfileLoading.value = true
+  try {
+    const profile = await fetchUserProfile(order.userId)
+    orderUserProfile.value = profile
+  } catch (e) {
+    orderUserProfile.value = null
+  } finally {
+    orderUserProfileLoading.value = false
+  }
+}
+
+// ─── Smart customer-name resolver ────────────────────────────────────
+// Some older orders don't have a top-level customerName field. We
+// pull the name from:
+//   1. `users/{uid}.displayName/name/fullName`  (already in orderUserProfile)
+//   2. order.customerName
+//   3. order.shippingAddress.fullName (structured address)
+//   4. first non-empty line of `selected.address` if it looks like "Name\n..."
+const addressFirstLine = (addr) => {
+  if (!addr) return null
+  const first = String(addr).split('\n').map(s => s.trim()).find(Boolean)
+  if (!first) return null
+  // Heuristic: if it has digits or ZIP/PIN it is NOT a name → don't fake-fill.
+  if (/\d/.test(first)) return null
+  return first
+}
+const customerDisplayName = computed(() => {
+  const o = selected.value || {}
+  const p = orderUserProfile.value || {}
+  return (
+    p.name ||
+    o.customerName ||
+    o.shippingAddress?.fullName ||
+    o.shippingAddress?.name ||
+    addressFirstLine(o.address) ||
+    addressFirstLine(o.shippingAddress?.line1) ||
+    null
+  )
+})
+const customerDisplayPhone = computed(() => {
+  const o = selected.value || {}
+  const p = orderUserProfile.value || {}
+  return p.phone || o.phone || o.shippingAddress?.phone || null
+})
+
+const loadHistory = async (orderId) => {
+  if (!orderId) return
+  orderHistoryLoading.value = true
+  try {
+    orderHistoryList.value = await fetchOrderHistory(orderId)
+  } catch (e) {
+    orderHistoryList.value = []
+  } finally {
+    orderHistoryLoading.value = false
+  }
 }
 
 const getOrderCreatedDate = (order) => {
@@ -177,33 +366,110 @@ const runAction = async (fn, statusUpdate) => {
   }
 }
 
-const handleConfirm = () => runAction(() => confirmOrderInDb(selected.value.id), 'confirmed')
+// ─── FSM-aware wrapper ────────────────────────────────────────────────
+// Best-effort: try the new /api/order-transition endpoint first so a
+// history entry is written. If the endpoint says "transitionNotPermitted"
+// we surface that. If the endpoint itself is unreachable (network/401), we
+// fall back to the original direct-write function so the workflow still
+// works — at the cost of no history for that one action.
+/* eslint-disable no-unused-vars */
+const withHistory = async ({ fsmCall, fallbackCall, statusUpdate, expectedFailurePrefix = '' }) => {
+  actionBusy.value = true
+  try {
+    try {
+      const out = await fsmCall()
+      if (selected.value && out?.toStatus) selected.value.shippingStatus = out.toStatus
+      if (selected.value?.id) await loadHistory(selected.value.id)
+      return
+    } catch (e) {
+      const msg = String(e?.message || '')
+      const isTransitionErr =
+        msg.includes('transitionNotPermitted') ||
+        msg.includes('invalidTransition') ||
+        msg.toLowerCase().startsWith(expectedFailurePrefix.toLowerCase())
+      if (!isTransitionErr) {
+        console.warn('FSM endpoint unavailable, falling back to direct write:', msg)
+      } else {
+        throw e
+      }
+    }
+    await fallbackCall()
+    if (statusUpdate && selected.value) selected.value.shippingStatus = statusUpdate
+    if (selected.value?.id) await loadHistory(selected.value.id)
+  } catch (e) {
+    alert(e.message)
+  } finally {
+    actionBusy.value = false
+  }
+}
+
+const handleConfirm = () => withHistory({
+  fsmCall: () => approveOrder(selected.value.id),
+  fallbackCall: () => confirmOrderInDb(selected.value.id),
+  statusUpdate: 'confirmed',
+})
 const handleShip = () => {
   if (!trackingId.value.trim()) return alert('Enter AWB')
-  runAction(() => shipOrderInDb(selected.value.id, trackingId.value), 'shipped')
+  withHistory({
+    fsmCall: () => shipOrder(selected.value.id, 'awb', trackingId.value.trim()),
+    fallbackCall: () => shipOrderInDb(selected.value.id, trackingId.value),
+    statusUpdate: 'shipped',
+  })
 }
-const handleDelivered = () => runAction(() => markOrderDeliveredInDb(selected.value.id), 'delivered')
+const handleDelivered = () => withHistory({
+  fsmCall: () => deliverOrder(selected.value.id),
+  fallbackCall: () => markOrderDeliveredInDb(selected.value.id),
+  statusUpdate: 'delivered',
+})
 const handleReject = () => {
   if (!rejectionComment.value.trim()) return alert('Reason?')
-  runAction(() => rejectOrderInDb(selected.value.id, rejectionComment.value))
+  withHistory({
+    fsmCall: () => cancelOrderFSM(selected.value.id, rejectionComment.value),
+    fallbackCall: () => rejectOrderInDb(selected.value.id, rejectionComment.value),
+    statusUpdate: 'rejected',
+  })
 }
 
 const handleProcessRefund = () => {
-  if (confirm('Processed refund in bank?')) runAction(() => processRefundInDb(selected.value.id), 'refunded')
+  if (!confirm('Processed refund in bank?')) return
+  withHistory({
+    fsmCall: () => markRefundedFSM(selected.value.id, {}, ''),
+    fallbackCall: () => processRefundInDb(selected.value.id),
+    statusUpdate: 'refunded',
+  })
 }
-const handleApproveReturn = () => runAction(() => approveReturnInDb(selected.value.id, selected.value.paymentMethod))
+const handleApproveReturn = () => withHistory({
+  fsmCall: () => approveReturnFSM(selected.value.id, ''),
+  fallbackCall: () => approveReturnInDb(selected.value.id, selected.value.paymentMethod),
+})
 const handleRejectReturn = () => {
   if (!returnRejectReason.value.trim()) return alert('Reason?')
-  runAction(() => rejectReturnInDb(selected.value.id, returnRejectReason.value), 'delivered')
+  withHistory({
+    fsmCall: () => rejectReturnFSM(selected.value.id, returnRejectReason.value),
+    fallbackCall: () => rejectReturnInDb(selected.value.id, returnRejectReason.value),
+    statusUpdate: 'delivered',
+  })
 }
-const handleApproveReplacement = () => runAction(() => approveReplacementInDb(selected.value.id), 'replacement_approved')
+const handleApproveReplacement = () => withHistory({
+  fsmCall: () => approveReplacementFSM(selected.value.id, ''),
+  fallbackCall: () => approveReplacementInDb(selected.value.id),
+  statusUpdate: 'replacement_approved',
+})
 const handleRejectReplacement = () => {
   if (!returnRejectReason.value.trim()) return alert('Reason?')
-  runAction(() => rejectReplacementInDb(selected.value.id, returnRejectReason.value), 'delivered')
+  withHistory({
+    fsmCall: () => rejectReplacementFSM(selected.value.id, returnRejectReason.value),
+    fallbackCall: () => rejectReplacementInDb(selected.value.id, returnRejectReason.value),
+    statusUpdate: 'rejected',
+  })
 }
 const handleMarkReplaced = () => {
   if (!trackingId.value.trim()) return alert('New AWB?')
-  runAction(() => markReplacedInDb(selected.value.id, trackingId.value), 'replaced')
+  withHistory({
+    fsmCall: () => markReplacedFSM(selected.value.id, 'awb', trackingId.value.trim()),
+    fallbackCall: () => markReplacedInDb(selected.value.id, trackingId.value),
+    statusUpdate: 'replaced',
+  })
 }
 
 const handleApproveRefund = async () => {
@@ -219,7 +485,67 @@ const handleRejectRefund = async () => {
 
 const handleCompleteRefund = async () => {
   if (!confirm(`💸 Confirm that ${money(selected.value?.amount)} has been refunded to the customer?`)) return
-  await runAction(() => completeRefund(selected.value.id), 'refunded')
+  await withHistory({
+    fsmCall: () => markRefundedFSM(selected.value.id, {
+      txnId: refundTxnId.value || '',
+      processedAt: refundDateInput.value ? new Date(refundDateInput.value) : new Date(),
+      note: refundNote.value || '',
+      amount: selected.value?.amount || 0,
+    }, refundNote.value || ''),
+    fallbackCall: () => completeRefund(selected.value.id, {
+      txnId: refundTxnId.value || '',
+      processedAt: refundDateInput.value ? new Date(refundDateInput.value) : new Date(),
+      note: refundNote.value || '',
+    }),
+    statusUpdate: 'refunded',
+  })
+}
+
+// ─── Pickup Mode chooser (admin approves replacement/return → asks how to take item back) ─
+const handlePickupChoice = async (mode) => {
+  if (!selected.value?.id) return
+  pickupChoiceBusy.value = true
+  try {
+    const label = mode === 'pickup' ? 'Reverse Pickup' : 'Self-ship via India Post'
+    const note = pickupChoiceNote.value?.trim() || label
+    await setPickupModeForOrder(selected.value.id, mode, note)
+    if (selected.value) selected.value.pickupMode = mode
+    if (selected.value) selected.value.pickupNote = note
+    if (selected.value) selected.value.pickupSetAt = new Date().toISOString()
+  } catch (e) {
+    alert('Failed to set pickup mode: ' + e.message)
+  } finally {
+    pickupChoiceBusy.value = false
+  }
+}
+const clearPickupChoice = async () => {
+  if (!selected.value?.id) return
+  pickupChoiceBusy.value = true
+  try {
+    await setPickupModeForOrder(selected.value.id, 'none')
+    if (selected.value) selected.value.pickupMode = null
+    if (selected.value) selected.value.pickupNote = null
+    if (selected.value) selected.value.pickupSetAt = null
+  } catch (e) {
+    alert('Failed to clear pickup mode: ' + e.message)
+  } finally {
+    pickupChoiceBusy.value = false
+  }
+}
+const copyWarehouseAddress = async () => {
+  const text = [
+    WAREHOUSE_ADDRESS.name,
+    WAREHOUSE_ADDRESS.line1,
+    WAREHOUSE_ADDRESS.line2,
+    `${WAREHOUSE_ADDRESS.country} – ${WAREHOUSE_ADDRESS.pincode}`,
+    `Phone: ${WAREHOUSE_ADDRESS.phone}`,
+  ].join('\n')
+  try {
+    await navigator.clipboard.writeText(text)
+    alert('Warehouse address copied to clipboard.')
+  } catch (e) {
+    alert('Copy failed: ' + e.message + '\n\n' + text)
+  }
 }
 
 const fmtDate = (ts) => {
@@ -230,6 +556,30 @@ const fmtDate = (ts) => {
 const fmtDateTime = (ts) => {
   const d = toDate(ts)
   return d ? d.toLocaleString('en-IN', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'N/A'
+}
+
+const formatHistoryArrow = (from, to) => {
+  const a = (from || '?').replace(/_/g, ' ')
+  const b = (to || '?').replace(/_/g, ' ')
+  return `${a} → ${b}`
+}
+
+const formatHistoryTitle = (ev) => {
+  const titleByAction = {
+    approve: '✓ Confirmed',
+    pack: '📦 Packed',
+    ship: '🚚 Shipped',
+    deliver: '✅ Delivered',
+    cancel: '❌ Cancelled',
+    request_return: '↩️ Return requested',
+    approve_return: '↩️ Return approved',
+    reject_return: '↩️ Return rejected',
+    mark_refunded: '💸 Refunded',
+    approve_replacement: '🔁 Replacement approved',
+    mark_replaced: '✅ Replacement shipped',
+    reject_replacement: '🚫 Replacement rejected',
+  }
+  return titleByAction[ev.action] || ev.action || 'Event'
 }
 
 const money = (val) => {
@@ -306,30 +656,64 @@ const getOrderTimeline = (order) => {
     </div>
 
     <div v-else class="orders-hub fade-in">
+      <div class="stats-strip">
+        <div class="stat-tile" :class="{ active: activeFilter === 'action_needed' }" @click="activeFilter = (activeFilter === 'action_needed' ? 'all' : 'action_needed')" style="cursor: pointer;">
+          <span class="stat-num">{{ countActionNeeded }}</span>
+          <span class="stat-text">Action Needed</span>
+        </div>
+        <div class="stat-tile" :class="{ active: activeFilter === 'return_requested' }" @click="activeFilter = (activeFilter === 'return_requested' ? 'all' : 'return_requested')" style="cursor: pointer;">
+          <span class="stat-num">{{ countReturnReq }}</span>
+          <span class="stat-text">Return Req</span>
+        </div>
+        <div class="stat-tile" :class="{ active: activeFilter === 'replacement_requested' }" @click="activeFilter = (activeFilter === 'replacement_requested' ? 'all' : 'replacement_requested')" style="cursor: pointer;">
+          <span class="stat-num">{{ countReplaceReq }}</span>
+          <span class="stat-text">Replace Req</span>
+        </div>
+        <div class="stat-tile" :class="{ active: activeFilter === 'refund_requested' }" @click="activeFilter = (activeFilter === 'refund_requested' ? 'all' : 'refund_requested')" style="cursor: pointer;">
+          <span class="stat-num">{{ countRefundReq }}</span>
+          <span class="stat-text">Refund Req</span>
+        </div>
+        <div class="stat-tile muted">
+          <span class="stat-num">{{ ordersList.length }}</span>
+          <span class="stat-text">Loaded ({{ hasMore ? 'more available' : 'all' }})</span>
+        </div>
+      </div>
+
       <div class="table-card">
         <div class="toolbar">
           <div class="search-row">
             <div class="search-box">
               <span class="search-icon">🔍</span>
-              <input v-model="searchQ" placeholder="Search product or Order ID..." />
+              <input v-model="searchQ" placeholder="Search product or paste Order ID (Enter to lookup)…" @keyup.enter="lookupOrderById" />
+              <button v-if="searchQ" class="clear-search" @click="clearSearch" title="Clear search">✕</button>
             </div>
+            <button class="btn-lookup" @click="lookupOrderById" :disabled="loading || !searchQ.trim()">🔎 Lookup by ID</button>
             <div class="date-box">
               <input type="date" v-model="dateFilter" class="clean-input" />
               <button v-if="dateFilter" class="clear-date" @click="dateFilter = ''">✕</button>
             </div>
           </div>
 
+          <div v-if="lookupNote" class="lookup-note">{{ lookupNote }}</div>
+
           <div class="filter-scroll">
             <button :class="['filter-pill', { active: activeFilter === 'all' }]" @click="activeFilter = 'all'">All</button>
+            <button :class="['filter-pill', 'priority-pill', { active: activeFilter === 'action_needed' }]" @click="activeFilter = 'action_needed'">⚡ Action Needed</button>
             <button :class="['filter-pill', { active: activeFilter === 'pending' }]" @click="activeFilter = 'pending'">Pending</button>
             <button :class="['filter-pill', { active: activeFilter === 'confirmed' }]" @click="activeFilter = 'confirmed'">Confirmed</button>
+            <button :class="['filter-pill', { active: activeFilter === 'packed' }]" @click="activeFilter = 'packed'">Packed</button>
             <button :class="['filter-pill', { active: activeFilter === 'shipped' }]" @click="activeFilter = 'shipped'">Shipped</button>
             <button :class="['filter-pill', { active: activeFilter === 'delivered' }]" @click="activeFilter = 'delivered'">Delivered</button>
-            <button :class="['filter-pill', { active: activeFilter === 'returns' }]" @click="activeFilter = 'returns'">Returns</button>
-            <button :class="['filter-pill', { active: activeFilter === 'cancelled' }]" @click="activeFilter = 'cancelled'">Cancelled</button>
-            <button :class="['filter-pill', { active: activeFilter === 'refund_requested' }]" @click="activeFilter = 'refund_requested'">Refund Req</button>
-            <button :class="['filter-pill', { active: activeFilter === 'refund_approved' }]" @click="activeFilter = 'refund_approved'">Refund Appr</button>
-            <button :class="['filter-pill', { active: activeFilter === 'refund_completed' }]" @click="activeFilter = 'refund_completed'">Refund Done</button>
+            <button :class="['filter-pill', { active: activeFilter === 'return_requested' }]" @click="activeFilter = 'return_requested'">↩️ Return Req</button>
+            <button :class="['filter-pill', { active: activeFilter === 'replacement_requested' }]" @click="activeFilter = 'replacement_requested'">🔁 Replace Req</button>
+            <button :class="['filter-pill', { active: activeFilter === 'replacement_approved' }]" @click="activeFilter = 'replacement_approved'">✅ Replace OK</button>
+            <button :class="['filter-pill', { active: activeFilter === 'replaced' }]" @click="activeFilter = 'replaced'">Replaced</button>
+            <button :class="['filter-pill', { active: activeFilter === 'returned_refund' }]" @click="activeFilter = 'returned_refund'">↩️ Returned Refund</button>
+            <button :class="['filter-pill', { active: activeFilter === 'returns_combined' }]" @click="activeFilter = 'returns_combined'">📦 All Returns</button>
+            <button :class="['filter-pill', { active: activeFilter === 'refund_requested' }]" @click="activeFilter = 'refund_requested'">💳 Refund Req</button>
+            <button :class="['filter-pill', { active: activeFilter === 'refund_approved' }]" @click="activeFilter = 'refund_approved'">💳 Refund Appr</button>
+            <button :class="['filter-pill', { active: activeFilter === 'refund_completed' }]" @click="activeFilter = 'refund_completed'">✅ Refund Done</button>
+            <button :class="['filter-pill', { active: activeFilter === 'cancelled' }]" @click="activeFilter = 'cancelled'">❌ Cancelled</button>
           </div>
         </div>
 
@@ -391,19 +775,82 @@ const getOrderTimeline = (order) => {
         <div class="modal-card slide-up">
           <div class="modal-header">
             <div>
-              <h3 style="margin: 0 0 4px; font-size: 16px; color: #0F172A;">Order #{{ (selected.id || 'UNKNOWN').toUpperCase() }}</h3>
-              <p style="margin: 0; font-size: 13px; color: #64748B;">{{ fmtDateTime(selected.createdAt) }} • {{ (selected.paymentMethod || 'N/A').toUpperCase() }} • {{ selected.paymentStatus || 'pending' }}</p>
+              <h3 style="margin: 0 0 4px; font-size: 16px; color: #0F172A;">
+                <span v-if="customerDisplayName">
+                  <strong>{{ customerDisplayName }}</strong>
+                  <span style="font-weight: 400; color: #64748B;"> · </span>
+                </span>
+                <span>Order #{{ (selected.id || 'UNKNOWN').toUpperCase() }}</span>
+              </h3>
+              <p style="margin: 0; font-size: 13px; color: #64748B;">
+                {{ fmtDateTime(selected.createdAt) }} • {{ (selected.paymentMethod || 'N/A').toUpperCase() }} • {{ selected.paymentStatus || 'pending' }}
+                <span v-if="customerDisplayPhone"> • 📞 {{ customerDisplayPhone }}</span>
+              </p>
             </div>
             <button class="close-btn" @click="closeOrder">✕</button>
           </div>
 
           <div class="modal-body">
-            <!-- Customer Info -->
+            <!-- Customer Info — full contact & address lookup so admin can arrange pickup -->
             <div class="info-card">
-              <h4 style="margin: 0 0 8px; font-size: 12px; text-transform: uppercase; color: #94A3B8;">Customer Info</h4>
-              <strong style="font-size: 14px; color: #0F172A;">{{ selected.customerName || 'N/A' }}</strong>
-              <p style="margin: 4px 0; font-size: 13px; color: #475569;">📞 {{ selected.phone || 'N/A' }}</p>
-              <p style="margin: 8px 0 0; padding-top: 8px; border-top: 1px dashed #E2E8F0; font-size: 13px; color: #64748B;">{{ selected.address || 'N/A' }}</p>
+              <h4 style="margin: 0 0 8px; font-size: 12px; text-transform: uppercase; color: #94A3B8;">
+                Customer Info
+                <button class="link-btn" @click="loadOrderUserProfile(selected)" :disabled="orderUserProfileLoading" style="float: right;">
+                  ↻ Refresh
+                </button>
+              </h4>
+              <!-- Big name so it's never missed -->
+              <div style="font-size: 18px; color: #0F172A; font-weight: 700; margin-bottom: 12px;">
+                {{ customerDisplayName || 'No name on record' }}
+              </div>
+              <div style="display: grid; gap: 6px; grid-template-columns: 1fr 1fr;">
+                <div>
+                  <span style="font-size: 11px; color: #94A3B8; text-transform: uppercase; letter-spacing: 0.5px;">Email</span>
+                  <div style="font-size: 13px; color: #334155;">{{ orderUserProfile?.email || selected.customerEmail || 'N/A' }}</div>
+                </div>
+                <div>
+                  <span style="font-size: 11px; color: #94A3B8; text-transform: uppercase; letter-spacing: 0.5px;">Phone</span>
+                  <div style="font-size: 13px; color: #334155;">
+                    <a v-if="customerDisplayPhone" :href="'tel:' + customerDisplayPhone" style="color: #2563EB; text-decoration: none;">
+                      📞 {{ customerDisplayPhone }}
+                    </a>
+                    <span v-else>N/A</span>
+                  </div>
+                </div>
+                <div style="grid-column: 1 / -1;">
+                  <span style="font-size: 11px; color: #94A3B8; text-transform: uppercase; letter-spacing: 0.5px;">User ID (UID)</span>
+                  <div style="font-size: 12px; color: #475569; font-family: monospace; word-break: break-all;">{{ selected.userId || 'N/A' }}</div>
+                </div>
+              </div>
+
+              <!-- Address — fall back from order.address, then user profile defaultAddress, then list all addresses -->
+              <div style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed #E2E8F0;">
+                <span style="font-size: 11px; color: #94A3B8; text-transform: uppercase; letter-spacing: 0.5px;">Shipping Address</span>
+                <div style="margin-top: 4px;">
+                  <p v-if="selected.address" style="margin: 0; font-size: 13px; color: #334155; white-space: pre-line;">
+                    {{ selected.address }}
+                    <span v-if="selected.pincode" style="font-weight: 600;"> — PIN {{ selected.pincode }}</span>
+                  </p>
+                  <div v-else-if="orderUserProfile?.defaultAddress" style="font-size: 13px; color: #334155;">
+                    <div style="font-weight: 600;">{{ orderUserProfile.defaultAddress.fullName || orderUserProfile.name || 'N/A' }}</div>
+                    <div>{{ orderUserProfile.defaultAddress.line1 || '' }} {{ orderUserProfile.defaultAddress.line2 || '' }}</div>
+                    <div>{{ orderUserProfile.defaultAddress.city || '' }}, {{ orderUserProfile.defaultAddress.state || '' }} — <strong>{{ orderUserProfile.defaultAddress.pincode || 'N/A' }}</strong></div>
+                    <div>📞 {{ orderUserProfile.defaultAddress.phone || orderUserProfile.phone || 'N/A' }}</div>
+                  </div>
+                  <p v-else style="margin: 0; font-size: 12px; color: #94A3B8;">No address on file for this order. (Older order — user must update address book.)</p>
+                </div>
+
+                <!-- If user has multiple addresses, list them -->
+                <details v-if="(orderUserProfile?.addresses || []).length > 1" style="margin-top: 8px;">
+                  <summary style="font-size: 11px; color: #2563EB; cursor: pointer;">📂 Other addresses on file ({{ orderUserProfile.addresses.length }})</summary>
+                  <ul style="margin: 6px 0 0; padding-left: 20px; font-size: 12px; color: #475569;">
+                    <li v-for="a in orderUserProfile.addresses" :key="a.id" style="margin-bottom: 6px;">
+                      <strong v-if="a.isDefault">★ </strong>{{ a.line1 }} {{ a.line2 }} {{ a.city }} {{ a.state }} – {{ a.pincode }}
+                      <span v-if="a.phone" style="color: #94A3B8;">({{ a.phone }})</span>
+                    </li>
+                  </ul>
+                </details>
+              </div>
             </div>
 
             <!-- Order Items -->
@@ -419,6 +866,32 @@ const getOrderTimeline = (order) => {
                 <span class="item-price">Qty: {{ item.quantity || 0 }} × {{ money(item.price) }}</span>
               </div>
               <div v-if="!(selected.items || []).length" class="text-sub" style="padding: 8px 0;">No items in this order.</div>
+            </div>
+
+            <!-- History Trail -->
+            <div class="history-card">
+              <div class="history-header">
+                <h4 style="margin: 0; font-size: 12px; text-transform: uppercase; color: #94A3B8;">Order History</h4>
+                <button class="history-refresh" @click="loadHistory(selected.id)" :disabled="orderHistoryLoading">↻ Refresh</button>
+              </div>
+              <div v-if="orderHistoryLoading && orderHistoryList.length === 0" class="history-empty">Loading…</div>
+              <div v-else-if="orderHistoryList.length === 0" class="history-empty">
+                No history yet. Future state changes will be recorded here. Older status changes made before history tracking was enabled will appear blank.
+              </div>
+              <ul v-else class="history-list">
+                <li v-for="ev in orderHistoryList" :key="ev.id" class="history-row">
+                  <span class="history-arrow">{{ formatHistoryArrow(ev.fromStatus, ev.toStatus) }}</span>
+                  <div class="history-text">
+                    <strong>{{ formatHistoryTitle(ev) }}</strong>
+                    <span class="history-meta">
+                      by {{ ev.actor?.email || ev.actor?.uid?.slice(0,6) + '…' || 'system' }}
+                      ({{ ev.actor?.role || '?' }})
+                      • {{ fmtDateTime(ev.ts) }}
+                    </span>
+                    <span v-if="ev.note" class="history-note">"{{ ev.note }}"</span>
+                  </div>
+                </li>
+              </ul>
             </div>
 
             <!-- Action Zone -->
@@ -450,6 +923,21 @@ const getOrderTimeline = (order) => {
               <div v-else-if="['cancelled_refund_pending', 'returned_refund_pending'].includes(selected.shippingStatus)" class="strict-actions alert-zone">
                 <p style="margin: 0 0 10px;">⚠️ Customer is waiting for a refund of <strong>{{ money(selected.amount) }}</strong>.</p>
                 <button class="btn-success w-100" @click="handleProcessRefund" :disabled="actionBusy">💸 Mark Refund Processed</button>
+
+                <!-- Returned: pick reverse-pickup vs self-ship -->
+                <div v-if="selected.shippingStatus === 'returned_refund_pending'" class="pickup-mode-card" style="background: #FEF2F2; border-color: #FCA5A5;">
+                  <h5 style="margin: 0 0 6px; font-size: 12px; text-transform: uppercase; color: #B91C1C;">↩️ Returned-Item Pickup Mode</h5>
+                  <p style="margin: 0 0 8px; font-size: 12px; color: #7F1D1D;">
+                    We owe <strong>{{ money(selected.amount) }}</strong> in refund. Decide how the customer returns the item first.
+                  </p>
+                  <div class="btn-group">
+                    <button class="btn-danger-outline w-100" @click="handlePickupChoice('pickup')" :disabled="pickupChoiceBusy">🚚 Reverse Pickup</button>
+                    <button class="btn-outline w-100" @click="handlePickupChoice('selfship')" :disabled="pickupChoiceBusy">📮 Self-Ship (India Post)</button>
+                  </div>
+                  <div v-if="selected.pickupMode" style="margin-top: 10px; font-size: 12px; color: #065F46; background: #ECFDF5; padding: 8px; border-radius: 6px; border: 1px solid #6EE7B7;">
+                    ✅ Set: <strong>{{ selected.pickupMode === 'pickup' ? 'Reverse Pickup' : 'Self-Ship' }}</strong>
+                  </div>
+                </div>
               </div>
 
               <!-- Return Requested -->
@@ -524,6 +1012,25 @@ const getOrderTimeline = (order) => {
               <div v-else-if="selected.shippingStatus === 'replacement_approved'" class="strict-actions">
                 <input v-model="trackingId" placeholder="New Replacement AWB..." class="clean-input w-100" style="margin-bottom: 10px;" />
                 <button class="btn-primary w-100" @click="handleMarkReplaced" :disabled="actionBusy">🚀 Mark Replacement Shipped</button>
+
+                <!-- Pickup mode chooser (admin decides how to receive original item back) -->
+                <div class="pickup-mode-card">
+                  <h5 style="margin: 0 0 6px; font-size: 12px; text-transform: uppercase; color: #94A3B8;">📦 Pickup Mode for Original Item</h5>
+                  <p style="margin: 0 0 10px; font-size: 12px; color: #64748B;">
+                    Customer: <strong>{{ orderUserProfile?.name || selected.customerName || 'N/A' }}</strong>
+                    <template v-if="orderUserProfile?.phone || selected.phone"> • 📞 <strong>{{ orderUserProfile?.phone || selected.phone }}</strong></template>
+                  </p>
+                  <input v-model="pickupChoiceNote" placeholder="Optional note (e.g. 'Delhivery 2-3 day pickup')" class="clean-input" style="margin-bottom: 10px;" />
+                  <div class="btn-group">
+                    <button class="btn-primary w-100" @click="handlePickupChoice('pickup')" :disabled="pickupChoiceBusy">🚚 Schedule Reverse Pickup</button>
+                    <button class="btn-outline w-100" @click="handlePickupChoice('selfship')" :disabled="pickupChoiceBusy">📮 Tell user to self-ship (India Post)</button>
+                  </div>
+                  <div v-if="selected.pickupMode" style="margin-top: 10px; padding: 10px; border-radius: 6px; background: #ECFDF5; border: 1px solid #6EE7B7; font-size: 12px; color: #065F46;">
+                    ✅ Set: <strong>{{ selected.pickupMode === 'pickup' ? 'Reverse Pickup Scheduled' : 'Self-Ship via India Post' }}</strong>
+                    <span v-if="selected.pickupNote"> — {{ selected.pickupNote }}</span>
+                    <button class="link-btn" @click="clearPickupChoice" :disabled="pickupChoiceBusy" style="margin-left: 8px;">Clear</button>
+                  </div>
+                </div>
               </div>
 
               <!-- Terminal States -->
@@ -554,6 +1061,17 @@ const getOrderTimeline = (order) => {
 @keyframes sUp { from { transform: translateY(20px) scale(0.95); opacity: 0; } to { transform: translateY(0) scale(1); opacity: 1; } }
 
 .orders-hub { width: 100%; }
+
+/* Quick-count tiles above the table */
+.stats-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; padding: 12px 24px; background: #FFFFFF; border-bottom: 1px solid #E2E8F0; }
+.stat-tile { display: flex; flex-direction: column; gap: 2px; padding: 12px 14px; border: 1px solid #E2E8F0; border-radius: 10px; background: #F8FAFC; transition: 0.18s; }
+.stat-tile:hover { border-color: #0F172A; background: #FFFFFF; }
+.stat-tile.active { background: #0F172A; border-color: #0F172A; color: #FFFFFF; }
+.stat-tile.muted { background: transparent; }
+.stat-num { font-size: 24px; font-weight: 800; line-height: 1; color: inherit; }
+.stat-tile.active .stat-num { color: #FFFFFF; }
+.stat-text { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: #64748B; font-weight: 600; }
+.stat-tile.active .stat-text { color: #CBD5E1; }
 .table-card { background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 0; box-shadow: 0 1px 3px rgba(0,0,0,0.04); overflow: hidden; }
 
 /* TOOLBAR */
@@ -561,8 +1079,20 @@ const getOrderTimeline = (order) => {
 .search-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 .search-box { position: relative; display: flex; align-items: center; width: 100%; max-width: 400px; }
 .search-icon { position: absolute; left: 12px; font-size: 12px; color: #94A3B8; }
-.search-box input { width: 100%; padding: 10px 12px 10px 32px; border: 1px solid #E2E8F0; border-radius: 8px; font-size: 13px; outline: none; color: #334155; font-family: inherit; }
+.search-box input { width: 100%; padding: 10px 32px 10px 32px; border: 1px solid #E2E8F0; border-radius: 8px; font-size: 13px; outline: none; color: #334155; font-family: inherit; }
 .search-box input:focus { border-color: #0F172A; }
+.clear-search { position: absolute; right: 8px; background: transparent; border: none; color: #94A3B8; cursor: pointer; font-size: 13px; padding: 4px 8px; }
+.clear-search:hover { color: #EF4444; }
+
+.btn-lookup { background: #FFFFFF; color: #0F172A; border: 1px solid #0F172A; padding: 9px 14px; border-radius: 8px; font-weight: 600; cursor: pointer; font-family: inherit; font-size: 13px; transition: 0.18s; }
+.btn-lookup:hover:not(:disabled) { background: #0F172A; color: #FFFFFF; }
+.btn-lookup:disabled { color: #94A3B8; border-color: #CBD5E1; cursor: not-allowed; }
+
+.lookup-note { padding: 8px 24px; background: #EFF6FF; color: #1E40AF; font-size: 12px; border-bottom: 1px solid #BFDBFE; }
+
+.priority-pill { background: #FFF7ED; border-color: #FDBA74; color: #C2410C; }
+.priority-pill:hover { border-color: #C2410C; color: #C2410C; background: #FFEDD5; }
+.priority-pill.active { background: #C2410C; color: #FFFFFF; border-color: #C2410C; }
 
 .date-box { position: relative; display: flex; align-items: center; }
 .date-box input { padding: 9px 28px 9px 10px; border: 1px solid #E2E8F0; border-radius: 8px; font-size: 13px; color: #334155; font-family: inherit; cursor: pointer; }
@@ -627,6 +1157,12 @@ const getOrderTimeline = (order) => {
 .modal-body { padding: 24px; overflow-y: auto; display: flex; flex-direction: column; gap: 20px; }
 .info-card { background: #F8FAFC; border: 1px solid #E2E8F0; padding: 16px; border-radius: 8px; }
 .items-card { border: 1px solid #E2E8F0; padding: 16px; border-radius: 8px; }
+
+/* Pickup mode chooser */
+.pickup-mode-card { background: #F8FAFC; border: 1px solid #CBD5E1; padding: 14px; border-radius: 8px; margin-top: 12px; }
+.link-btn { background: transparent; border: none; color: #2563EB; font-size: 11px; cursor: pointer; padding: 0; font-family: inherit; text-decoration: underline; }
+.link-btn:hover { color: #1D4ED8; }
+.link-btn:disabled { color: #94A3B8; cursor: not-allowed; }
 .m-item { display: flex; gap: 12px; align-items: center; padding-bottom: 12px; border-bottom: 1px dashed #E2E8F0; margin-bottom: 12px; }
 .m-item:last-child { border: none; padding-bottom: 0; margin-bottom: 0; }
 .m-item-img { width: 44px; height: 44px; border-radius: 6px; object-fit: cover; border: 1px solid #E2E8F0; }
@@ -635,6 +1171,18 @@ const getOrderTimeline = (order) => {
 .item-price { font-size: 13px; color: #475569; }
 
 .action-zone { background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 8px; padding: 16px; }
+
+.history-card { background: #ffffff; border: 1px solid #E2E8F0; border-radius: 8px; padding: 14px 16px; }
+.history-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.history-refresh { background: white; border: 1px solid #cbd5e1; border-radius: 4px; padding: 3px 10px; cursor: pointer; font-size: 12px; color: #334155; }
+.history-empty { color: #94a3b8; font-size: 12px; padding: 8px 0; }
+.history-list { list-style: none; padding: 0; margin: 0; max-height: 240px; overflow-y: auto; }
+.history-row { display: flex; gap: 10px; align-items: flex-start; padding: 8px 0; border-bottom: 1px dashed #e2e8f0; }
+.history-row:last-child { border-bottom: none; }
+.history-arrow { font-family: monospace; font-weight: 600; color: #1e40af; background: #eff6ff; padding: 2px 8px; border-radius: 4px; font-size: 12px; white-space: nowrap; }
+.history-text { display: flex; flex-direction: column; gap: 2px; font-size: 13px; color: #0f172a; }
+.history-meta { font-size: 11px; color: #64748b; }
+.history-note { font-size: 12px; color: #475569; font-style: italic; margin-top: 2px; }
 .alert-zone { background: #FFF1F2 !important; border: 1px dashed #FCA5A5 !important; }
 
 .reject-box { display: flex; gap: 8px; margin-top: 10px; padding-top: 10px; border-top: 1px dashed #CBD5E1; }

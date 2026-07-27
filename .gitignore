@@ -44,3 +44,5 @@ front/node_modules/
 .dev.vars*
 !.dev.vars.example
 !.env.example
+front/firestore.rules
+add-admin.js

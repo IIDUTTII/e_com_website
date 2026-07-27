@@ -20,6 +20,49 @@ import { ref as storageRef, uploadBytes, getDownloadURL, deleteObject, listAll, 
 import imageCompression from 'browser-image-compression'
 import { storage } from '../firebase.js'
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 🏭 Warehouse / Reverse-pickup address — shown to users when self-shipping
+// ─────────────────────────────────────────────────────────────────────────────
+export const WAREHOUSE_ADDRESS = {
+  name: 'PahadS Returns Desk',
+  line1: 'C/o PahadS, Plot 24, Industrial Estate',
+  line2: 'Parwanoo, Solan, Himachal Pradesh',
+  country: 'India',
+  pincode: '173220',
+  phone: '+91 98000 12345',
+  hours: 'Mon-Sat, 10:00-17:00 IST',
+  landmark: 'Behind IOCL Petrol Pump, take service road after HP Petrol Bunk',
+  note: 'Mention your Order ID on the package. Keep the original packaging if possible.',
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HTTP helpers — fail loudly with server message + status + body snippet
+// ─────────────────────────────────────────────────────────────────────────────
+async function readErrorBody(res) {
+  let raw = ''
+  let parsedErr = null
+  try { raw = await res.text(); parsedErr = raw ? JSON.parse(raw) : null } catch (_) { /* non-JSON */ }
+  const serverMsg = parsedErr?.error || parsedErr?.message || parsedErr?.description
+  const snippet = raw ? raw.slice(0, 300).replace(/\s+/g, ' ').trim() : ''
+  const detail = serverMsg || snippet || res.statusText || 'unknown error'
+  return `HTTP ${res.status} ${res.statusText || ''} — ${detail}`
+}
+
+export async function fetchJson(url, options = {}, label = url) {
+  let res
+  try {
+    res = await fetch(url, options)
+  } catch (e) {
+    const cause = e?.cause?.code || e?.cause?.message || ''
+    throw new Error(`${label} network failure: ${e.message}${cause ? ` (${cause})` : ''}`)
+  }
+  if (!res.ok) {
+    const detail = await readErrorBody(res)
+    throw new Error(`${label} failed: ${detail}`)
+  }
+  return res.json()
+}
+
 // In-Memory Cache Layer
 let _activeProductsCache = null
 const googleProvider = new GoogleAuthProvider();
@@ -644,6 +687,8 @@ export async function addProductToCart(product, finalPrice, selectedVariant = nu
        variant   : variantLabel,
        variantId : variantId,
        price     : Number(finalPrice),
+       priceAtAdd: Number(finalPrice),
+       priceAtAddAt: new Date(),
        emoji     : product.emoji || '📦',
        imageUrl  : primaryImg,
        slug      : slug,
@@ -661,6 +706,57 @@ export async function saveCartItems(updatedItems) {
   const cartRef = doc(db, 'carts', user.uid)
   await setDoc(cartRef, { items: updatedItems }, { merge: true })
   bustCartCache()
+}
+
+/**
+ * Compare current cart snapshot prices with live catalog prices.
+ * Returns [{ productId, variant, cartQty, cartPrice, livePrice, delta, variantActive, productActive }, ...]
+ * Servers cannot be tricked: create-order.js recreates price server-side from products,
+ * but UI freshness benefits from a visible drift report.
+ */
+export async function detectCartPriceDrift(cartItems, tolerancePct = 5) {
+  if (!cartItems || cartItems.length === 0) return { drifts: [], hasAnyDrift: false, tolPct: tolerancePct }
+  const liveMap = await fetchCartItemsStock(cartItems)
+  const drifts = []
+  for (const item of cartItems) {
+    const variantLabel = item.variant || item.weight || 'Standard'
+    const key = `${item.productId}::${variantLabel}`
+    const live = liveMap.get(key)
+    if (!live) continue
+    const cartPrice = Number(item.price) || 0
+    const livePrice = Number(live.price) || 0
+    if (livePrice <= 0 || cartPrice <= 0) continue
+    const delta = livePrice - cartPrice
+    const deltaPct = Math.abs(delta) / cartPrice * 100
+    if (deltaPct >= tolerancePct) {
+      drifts.push({
+        productId: item.productId,
+        name: item.name,
+        variant: variantLabel,
+        cartPrice, livePrice, delta, deltaPct: Math.round(deltaPct * 10) / 10,
+        productActive: !!live.isActive, variantActive: !!live.variantActive,
+        stock: Number(live.stock) || 0
+      })
+    }
+  }
+  return { drifts, hasAnyDrift: drifts.length > 0, tolPct: tolerancePct }
+}
+
+/**
+ * Replace cart row prices with the live current catalog prices.
+ * Use after user agrees to "refresh cart to current prices".
+ */
+export async function refreshCartToCurrentPrices(cartItems) {
+  if (!cartItems || cartItems.length === 0) return []
+  const liveMap = await fetchCartItemsStock(cartItems)
+  const updated = cartItems.map(item => {
+    const variantLabel = item.variant || item.weight || 'Standard'
+    const live = liveMap.get(`${item.productId}::${variantLabel}`)
+    if (!live || !live.price) return item
+    return { ...item, price: Number(live.price), priceAtAdd: Number(live.price), priceRefreshedAt: new Date() }
+  })
+  await saveCartItems(updated)
+  return updated
 }
 
 
@@ -1087,19 +1183,15 @@ export const calculateOrderSecure = async (items, couponCode) => {
   const user = auth.currentUser;
   if (!user) throw new Error('NOT_LOGGED_IN');
   const idToken = await user.getIdToken();
-  const res = await fetch('/api/calculate-order', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${idToken}`,
+  return fetchJson(
+    '/api/calculate-order',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${idToken}` },
+      body: JSON.stringify({ items, couponCode }),
     },
-    body: JSON.stringify({ items, couponCode }),
-  });
-  if (!res.ok) {
-    const err = await res.json();
-    throw new Error(err.error || 'Calculation failed');
-  }
-  return await res.json();
+    'calculate-order',
+  );
 };
 
 export const createOrderSecure = async (orderPayload) => {
@@ -1108,27 +1200,148 @@ export const createOrderSecure = async (orderPayload) => {
   
   try {
     const idToken = await user.getIdToken(true);
-    
-    const response = await fetch('/api/create-order', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${idToken}`,
+    return await fetchJson(
+      '/api/create-order',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${idToken}` },
+        body: JSON.stringify(orderPayload),
       },
-      body: JSON.stringify(orderPayload),
-    });
-    
-    if (!response.ok) {
-      const errorData = await response.json();
-      throw new Error(errorData.error || 'Order creation failed');
-    }
-    
-    return await response.json();
+      'create-order',
+    );
   } catch (error) {
     console.error('createOrderSecure error:', error);
     throw error;
   }
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 🔁 ORDER TRANSITIONS (FSM + history subcollection)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Every state-changing action (approve, ship, deliver, cancel, refund,
+// return) is delegated to /api/order-transition, which writes a single
+// history document into orders/{id}/history/{hist_…} alongside the order
+// update — atomic pair. The history sub-collection is the customer-care
+// audit trail the user asked for: every actor, every note, every status
+// flip. UI helpers below stay compact — they just call the endpoint.
+
+export const ORDER_HISTORY_REFRESH_MS = 4000;
+
+export async function fetchOrderHistory(orderId) {
+  if (!orderId) return [];
+  try {
+    const user = auth.currentUser;
+    if (!user) return [];
+    const idToken = await user.getIdToken();
+    const dbId = (typeof window !== 'undefined' && window.__firebase_project_id) || 'pahadse-13309';
+    const url = `https://firestore.googleapis.com/v1/projects/${dbId}/databases/(default)/documents/orders/${orderId}/history?pageSize=100&orderBy=ts%20DESC`;
+    const res = await fetch(url, { headers: { 'Authorization': `Bearer ${idToken}` } });
+    if (!res.ok) return [];
+    const data = await res.json();
+    const docs = data.documents || [];
+    return docs.map(d => historyFromFirestore(d));
+  } catch (e) {
+    console.warn('fetchOrderHistory failed:', e.message);
+    return [];
+  }
+}
+
+function historyFromFirestore(doc) {
+  const f = doc.fields || {};
+  const out = { id: doc.name?.split('/').pop() };
+  for (const [k, v] of Object.entries(f)) out[k] = readFsValue(v);
+  return out;
+}
+function readFsValue(v) {
+  if (!v || typeof v !== 'object') return null;
+  if (v.stringValue !== undefined) return v.stringValue;
+  if (v.integerValue !== undefined) return Number(v.integerValue);
+  if (v.doubleValue !== undefined) return Number(v.doubleValue);
+  if (v.booleanValue !== undefined) return v.booleanValue;
+  if (v.timestampValue !== undefined) return v.timestampValue;
+  if (v.nullValue !== undefined) return null;
+  if (v.arrayValue?.values) return v.arrayValue.values.map(readFsValue);
+  if (v.mapValue?.fields) {
+    const o = {}; for (const [k, fv] of Object.entries(v.mapValue.fields)) o[k] = readFsValue(fv); return o;
+  }
+  return null;
+}
+
+function transitionPromise(orderId, body, label) {
+  // Thin caller for /api/order-transition. We re-use fetchJson for network
+  // errors already; here we want the server-side FSM errors to propagate
+  // with a clear "transitionNotPermitted" / "invalidTransition" tag.
+  const user = auth.currentUser;
+  if (!user) return Promise.reject(new Error('NOT_LOGGED_IN'));
+  return user.getIdToken().then(idToken =>
+    fetchJson(
+      `/api/order-transition?orderId=${encodeURIComponent(orderId)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${idToken}` },
+        body: JSON.stringify(body),
+      },
+      label,
+    )
+  );
+}
+
+export async function approveOrder(orderId, note = '') {
+  return transitionPromise(orderId, { action: 'approve', note }, 'approve');
+}
+export async function packOrder(orderId, note = '') {
+  return transitionPromise(orderId, { action: 'pack', note }, 'pack');
+}
+export async function shipOrder(orderId, provider = '', awb = '', note = '') {
+  return transitionPromise(orderId, { action: 'ship', tracking: { provider, awb }, note }, 'ship');
+}
+export async function deliverOrder(orderId, note = '') {
+  return transitionPromise(orderId, { action: 'deliver', note }, 'deliver');
+}
+export async function cancelOrderFSM(orderId, note = '') {
+  return transitionPromise(orderId, { action: 'cancel', note }, 'cancel');
+}
+export async function requestReturnFSM(orderId, note = '') {
+  return transitionPromise(orderId, { action: 'request_return', note }, 'request_return');
+}
+export async function approveReturnFSM(orderId, note = '') {
+  return transitionPromise(orderId, { action: 'approve_return', note }, 'approve_return');
+}
+export async function rejectReturnFSM(orderId, note = '') {
+  return transitionPromise(orderId, { action: 'reject_return', note }, 'reject_return');
+}
+export async function markRefundedFSM(orderId, refundDetails = {}, note = '') {
+  const processedAt = refundDetails.processedAt instanceof Date
+    ? refundDetails.processedAt.toISOString()
+    : (refundDetails.processedAt || new Date().toISOString());
+  return transitionPromise(orderId, {
+    action: 'mark_refunded',
+    note,
+    refund: {
+      txnId: refundDetails.txnId || '',
+      amount: Number(refundDetails.amount) || 0,
+      processedAt,
+      note: refundDetails.note || '',
+    },
+  }, 'mark_refunded');
+}
+
+export async function approveReplacementFSM(orderId, note = '') {
+  return transitionPromise(orderId, { action: 'approve_replacement', note }, 'approve_replacement');
+}
+
+export async function markReplacedFSM(orderId, provider = '', awb = '', note = '') {
+  return transitionPromise(orderId, {
+    action: 'mark_replaced',
+    tracking: { provider, awb },
+    note,
+  }, 'mark_replaced');
+}
+
+export async function rejectReplacementFSM(orderId, note = '') {
+  return transitionPromise(orderId, { action: 'reject_replacement', note }, 'reject_replacement');
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 💰 REFUND MANAGEMENT
@@ -1288,20 +1501,14 @@ export const fetchRazorpayPayments = async (count = 20, skip = 0) => {
   }
   
   const idToken = await user.getIdToken();
-  const res = await fetch(`/api/razorpay-payments?count=${count}&skip=${skip}`, {
-    method: 'GET',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${idToken}`,
+  return await fetchJson(
+    `/api/razorpay-payments?count=${count}&skip=${skip}`,
+    {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${idToken}` },
     },
-  });
-  
-  if (!res.ok) {
-    const err = await res.json();
-    throw new Error(err.error || 'Failed to fetch Razorpay payments');
-  }
-  
-  return await res.json();
+    'razorpay-payments',
+  );
 };
 
 
@@ -1994,3 +2201,67 @@ export async function deleteAboutImage(fileUrl) {
     console.warn('deleteAboutImage failed:', e.message)
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 👤 USER PROFILE LOOKUP — used by Admin to see contact info when an order is open
+// ─────────────────────────────────────────────────────────────────────────────
+/**
+ * Fetch a single user's profile from `users/{uid}`.
+ * Returns { uid, name, email, phone, addresses[], defaultAddress }.
+ * Cache-bypassed — admins need fresh data.
+ */
+export async function fetchUserProfile(uid) {
+  if (!uid) return null
+  try {
+    const snap = await getDoc(doc(db, 'users', uid))
+    if (!snap.exists()) return { uid, name: null, email: null, phone: null, addresses: [], defaultAddress: null }
+    const data = snap.data()
+    const addresses = Array.isArray(data.addresses) ? data.addresses : []
+    const defaultAddress = addresses.find(a => a.isDefault) || addresses[0] || null
+    return {
+      uid,
+      name: data.displayName || data.name || data.fullName || null,
+      email: data.email || null,
+      phone: data.phone || defaultAddress?.phone || null,
+      addresses,
+      defaultAddress,
+      role: data.role || 'user',
+    }
+  } catch (e) {
+    console.warn('fetchUserProfile failed for', uid, e.message)
+    return { uid, name: null, email: null, phone: null, addresses: [], defaultAddress: null }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 🚚 PICKUP MODE — admin selects "schedule pickup" vs "self-ship" after approval
+// ─────────────────────────────────────────────────────────────────────────────
+/**
+ * Set the pickup mode on an order. Called by admin after approving a
+ * replacement or return. Persists as a top-level field so the user's
+ * My Orders page can read it.
+ *
+ * mode:
+ *   'pickup'   — admin will schedule a reverse pickup from user's address.
+ *   'selfship' — user self-ships via India Post / Speed Post to warehouse.
+ *   'none'     — clear any prior selection.
+ *
+ * companion fields (pickupMode, pickupNote, pickupSetAt, pickupSetBy) are
+ * written directly to /orders/{id} via Firestore SDK. Admin writes are
+ * permitted by the rules in firestore.rules (isAdmin() allow update).
+ */
+export async function setPickupModeForOrder(orderId, mode, note = '') {
+  if (!orderId) throw new Error('ORDER_ID_REQUIRED')
+  if (!['pickup', 'selfship', 'none'].includes(mode)) throw new Error('INVALID_PICKUP_MODE')
+
+  const ref = doc(db, 'orders', orderId)
+  const user = auth.currentUser
+  await updateDoc(ref, {
+    pickupMode: mode === 'none' ? null : mode,
+    pickupNote: mode === 'none' ? null : note || null,
+    pickupSetAt: mode === 'none' ? null : serverTimestamp(),
+    pickupSetBy: mode === 'none' ? null : (user?.uid || 'admin'),
+  })
+  return true
+}
+

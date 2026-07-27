@@ -3,7 +3,7 @@ import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { db, auth } from '../firebase.js'
 import { doc, getDoc } from 'firebase/firestore'
-import { fetchShippingConfig, fetchCart, createOrderSecure, fetchCartItemsStock } from './db.js'
+import { fetchShippingConfig, fetchCart, createOrderSecure, fetchCartItemsStock, detectCartPriceDrift, refreshCartToCurrentPrices } from './db.js'
 
 defineOptions({ name: 'Checkout' })
 const router = useRouter()
@@ -26,8 +26,34 @@ async function refreshStock() {
   stockLoading.value = true
   try {
     stockMap.value = await fetchCartItemsStock(cartItems.value)
+    await checkPriceDrift()
   } catch (e) { console.warn('Stock refresh failed:', e) }
   finally { stockLoading.value = false }
+}
+
+const priceDrifts = ref([])
+const priceDriftVisible = ref(false)
+
+async function checkPriceDrift() {
+  try {
+    const report = await detectCartPriceDrift(cartItems.value, 5)
+    priceDrifts.value = report.drifts
+    priceDriftVisible.value = false
+  } catch (e) {
+    console.warn('Price drift check failed:', e)
+  }
+}
+
+async function acceptDriftAndProceed() { priceDriftVisible.value = false }
+async function refreshCartPrices() {
+  try {
+    const updated = await refreshCartToCurrentPrices(cartItems.value)
+    cartItems.value = updated
+    priceDrifts.value = []
+    priceDriftVisible.value = false
+  } catch (e) {
+    alert('Failed to refresh: ' + e.message)
+  }
 }
 
 function getItemStockInfo(item) {
@@ -187,10 +213,16 @@ const openRazorpayModal = async (orderPayload) => {
 // PROCESS CHECKOUT SUBMISSION – now sends only essential data
 // ─────────────────────────────────────────────────────────────
 const processCheckoutSubmission = async () => {
-  if (!activeSelectedAddressObject.value) { 
-    alert("Please choose a valid destination route address."); 
-    return; 
+  if (!activeSelectedAddressObject.value) {
+    alert("Please choose a valid destination route address.");
+    return;
   }
+
+  if (priceDrifts.value.length > 0 && !priceDriftVisible.value) {
+    priceDriftVisible.value = true;
+    return;
+  }
+
   processingOrder.value = true;
 
   const target = activeSelectedAddressObject.value;
@@ -254,6 +286,34 @@ const processCheckoutSubmission = async () => {
         <div class="form-content-wrapper">
           
           <h1 class="page-main-title">Checkout</h1>
+
+          <div v-if="priceDrifts.length > 0" class="drift-banner" :class="{ expanded: priceDriftVisible }">
+            <div class="drift-head">
+              <span class="drift-icon">💸</span>
+              <span v-if="!priceDriftVisible">
+                {{ priceDrifts.length }} item{{ priceDrifts.length === 1 ? '' : 's' }} have a different price than when you added to cart.
+              </span>
+              <span v-else>Review the price changes before checkout:</span>
+              <button v-if="!priceDriftVisible" class="drift-toggle" @click="priceDriftVisible = true">Review</button>
+            </div>
+            <ul v-if="priceDriftVisible" class="drift-list">
+              <li v-for="d in priceDrifts" :key="d.productId + d.variant">
+                <strong>{{ d.name }}</strong> <span class="drift-variant">({{ d.variant }})</span><br />
+                Cart price: ₹{{ d.cartPrice }} → Current price: <strong>₹{{ d.livePrice }}</strong>
+                <span :class="['drift-arrow', d.delta > 0 ? 'up' : 'down']">
+                  {{ d.delta > 0 ? '↑' : '↓' }} ₹{{ Math.abs(d.delta) }} ({{ d.deltaPct }}%)
+                </span>
+              </li>
+            </ul>
+            <div v-if="priceDriftVisible" class="drift-actions">
+              <button class="btn-dark-outline" @click="refreshCartPrices">Refresh cart to current prices</button>
+              <button class="btn-primary-large" @click="acceptDriftAndProceed">Proceed with cart snapshot</button>
+            </div>
+            <p v-if="priceDriftVisible" class="drift-note">
+              💡 Your payment will be calculated against the <strong>current</strong> server-side prices either way —
+              refresh just keeps the displayed cart in sync.
+            </p>
+          </div>
 
           <section class="checkout-section">
             <div class="section-header">
@@ -398,6 +458,19 @@ const processCheckoutSubmission = async () => {
 
 <style scoped>
 .seamless-checkout-page{background:#faf7f4;min-height:100vh;font-family:'Jost',sans-serif;color:#1a1a2e;padding-top:80px}
+
+.drift-banner{background:#fff8e1;border:1px solid #f0c674;border-radius:10px;padding:14px 16px;margin-bottom:18px}
+.drift-banner.expanded{background:#fff3cd}
+.drift-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:0.95rem;color:#7a4b00}
+.drift-icon{font-size:1.2rem}
+.drift-toggle{margin-left:auto;background:#fff;border:1px solid #d39e00;border-radius:6px;padding:4px 12px;cursor:pointer;color:#7a4b00;font-weight:600}
+.drift-list{margin:12px 0 8px;padding-left:18px;color:#3a2a00}
+.drift-variant{color:#8a6a3a}
+.drift-arrow{margin-left:6px;font-weight:700}
+.drift-arrow.up{color:#c0392b}
+.drift-arrow.down{color:#16a34a}
+.drift-actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:10px}
+.drift-note{font-size:0.8rem;color:#7a4b00;margin-top:10px;margin-bottom:0;font-style:italic}
 .checkout-split-layout{display:flex;min-height:calc(100vh - 80px);gap:24px;max-width:1200px;margin:0 auto}
 .checkout-form-side{flex:1.2;background:#ffffff;display:flex;justify-content:flex-start;padding:32px 40px 60px 40px;border-radius:12px}
 .checkout-summary-side{flex:0.8;background:#ffffff;display:flex;justify-content:flex-start;padding:32px 40px 60px 40px;border-radius:12px}
