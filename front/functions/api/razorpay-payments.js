@@ -43,6 +43,12 @@ export async function onRequest(context) {
     const skip = parseInt(url.searchParams.get('skip')) || 0;
 
     // ─── Fetch from Razorpay API ───
+    if (!env.RAZORPAY_KEY_ID || !env.RAZORPAY_KEY_SECRET) {
+      return new Response(JSON.stringify({ error: 'Payment processor is not configured.', errorStage: 'razorpay_secrets_missing' }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
+      });
+    }
     const rzpAuth = 'Basic ' + btoa(`${env.RAZORPAY_KEY_ID}:${env.RAZORPAY_KEY_SECRET}`);
     const rzpRes = await fetch(`https://api.razorpay.com/v1/payments?count=${count}&skip=${skip}`, {
       headers: { 'Authorization': rzpAuth },

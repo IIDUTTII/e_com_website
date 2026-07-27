@@ -72,3 +72,10 @@ restart.sh
 server.*.log
 front/server.*.log
 wrangler-debug.log
+
+# Ad-hoc one-shot helpers (never commit session-specific debug scripts)
+restore-*.sh
+verify-*.sh
+fix-*.sh
+debug-*.sh
+smoke-*.sh

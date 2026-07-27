@@ -39,10 +39,12 @@ export async function onRequest(context) {
   try {
     // ─── 1. VERIFY RAZORPAY SIGNATURE ───
     const TEST_MODE = env.TEST_MODE === 'true' || false;
-    const secret = TEST_MODE ? 'test_secret' : (env.RAZORPAY_KEY_SECRET || 'wBOsE6IhL3Fkr5Jt3Jr1xHi8');
+    const secret = env.RAZORPAY_KEY_SECRET;
     if (!secret && !TEST_MODE) {
-      return new Response(JSON.stringify({ error: 'Missing Razorpay Secret' }), { status: 500 });
+      return new Response(JSON.stringify({ error: 'Payment processor misconfigured. Please contact support.', errorStage: 'secret_missing' }), { status: 500, headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' } });
     }
+    // Backwards-compat alias for refund / failure-write blocks later in the file
+    const envSecret = secret || (TEST_MODE ? 'test_secret' : null);
 
     if (!TEST_MODE) {
       const encoder = new TextEncoder();
