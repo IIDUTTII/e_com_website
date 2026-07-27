@@ -1,0 +1,34 @@
+# .wranglerignore — files in front/ that should NOT be bundled into the
+# Cloudflare Pages worker. Wrangler walks this file with gitignore-like
+# globs at bundle time (handy for venvs, debug scripts, and local secrets).
+
+# Python virtualenv created in front/ by accident — contains a 31 MB
+# libunicorn.a that exceeds the 25 MB asset ceiling.
+venv/
+**/venv/
+**/venv/lib/**
+
+# Build-time / node deps.
+node_modules/
+.wrangler/
+
+# Local secrets — wrangler already auto-excludes .dev.vars, but list it
+# explicitly for clarity.
+.dev.vars
+.env
+.env.*
+
+# Admin / repo junk that should never reach a deploy.
+.claude/
+.vscode/
+.firebaserc
+py1.py
+skills-lock.json
+.gitignore
+*.md
+README.md
+
+# Diagnostic CJS scripts used during local debugging only.
+*.cjs
+test-sa*.cjs
+check-*.cjs
