@@ -79,3 +79,8 @@ verify-*.sh
 fix-*.sh
 debug-*.sh
 smoke-*.sh
+
+# Consolidated Cloudflare vars/secrets scratch file
+cf-vars.txt
+cf-secrets.json
+cloudflare-env-*
