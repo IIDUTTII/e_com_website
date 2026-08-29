@@ -569,7 +569,7 @@ const primaryImage = (p) => p.imageUrls?.find((u) => u?.trim()) ?? null
     padding: 10px 11px 12px;
   }
   .product-name {
-    font-size: 13px;
+    font-size: 13px; 768px
   }
   .product-desc {
     font-size: 11px;
