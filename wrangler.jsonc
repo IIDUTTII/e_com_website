@@ -8,5 +8,10 @@
   },
   "compatibility_flags": [
     "nodejs_compat"
-  ]
+  ],
+  "vars": {
+    "RAZORPAY_KEY_ID": "rzp_test_T54mB31WZLQDv4",
+    "FIREBASE_PROJECT_ID": "pahadse-13309",
+    "FIREBASE_API_KEY": "AIzaSyABec4VYQBnHpyzP1IX4TmW8muY3_VQHDM"
+  }
 }

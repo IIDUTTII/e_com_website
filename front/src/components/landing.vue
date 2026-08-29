@@ -45,7 +45,7 @@
            }"
            @mousedown="startDrag($event, card.id)"
            @touchstart="startDragTouch($event, card.id)">
-        <span class="card-label">{{ card.label }}</span>
+        <!-- labels removed for cleaner look -->
         <div v-if="card.style === 'distort'" class="glass-filter"></div>
         <div class="glass-overlay"></div>
         <div v-if="card.style !== 'frosted'" class="glass-specular"></div>
@@ -71,12 +71,71 @@
 
     <!-- CHANGED (#3): everything below hero is hidden until intro animation finishes -->
     <div class="below-fold" :class="{ 'below-visible': settled }">
-      <!-- EXPLORE BUTTON -->
+      <!-- PRIMARY CTAs -->
       <div class="cta-section" :class="{ 'cta-visible': settled }">
-        <div class="btn-wrap" @click="togglePopup">
-          <button class="glass-btn"><span>✨ Explore</span></button>
+        <div class="cta-row">
+          <div class="btn-wrap" @click="goTo('products')">
+            <button class="glass-btn primary-cta"><span>🛍️ Shop Now</span></button>
+          </div>
+          <div class="btn-wrap secondary-wrap" @click="togglePopup">
+            <button class="glass-btn secondary-cta"><span>✨ Explore</span></button>
+          </div>
         </div>
       </div>
+
+      <!-- WHY PAHAD S (Benefits) -->
+      <section class="benefits-section">
+        <p class="section-eyebrow">Why PahadS</p>
+        <div class="benefits-grid">
+          <div class="benefit-item">
+            <div class="benefit-icon">🌿</div>
+            <h4>100% Pure</h4>
+            <p>No additives, no preservatives — just pure Himalayan goodness</p>
+          </div>
+          <div class="benefit-item">
+            <div class="benefit-icon">🪵</div>
+            <h4>Bilona Method</h4>
+            <p>Traditionally hand-churned in small batches the old way</p>
+          </div>
+          <div class="benefit-item">
+            <div class="benefit-icon">🐄</div>
+            <h4>A2 Desi Cows</h4>
+            <p>From desi cows grazing high in the mountains</p>
+          </div>
+          <div class="benefit-item">
+            <div class="benefit-icon">🏔️</div>
+            <h4>From the Hills</h4>
+            <p>Sourced directly from families across Himachal</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- UPDATES SLIDER (keeps floating cards above, shows 2–3 rotating stories) -->
+      <section class="updates-section">
+        <p class="section-eyebrow">From the hills</p>
+        <h2 class="section-heading">What’s new</h2>
+        <div class="updates-slider">
+          <div class="updates-track" :style="{ transform: `translateX(-${slideIndex * 100}%)` }">
+            <div v-for="(slide, i) in updateSlides" :key="i" class="update-slide">
+              <div class="update-image-wrap">
+                <img :src="slide.image" :alt="slide.title" class="update-image" loading="lazy"/>
+              </div>
+              <div class="update-copy">
+                <span class="update-tag">{{ slide.tag }}</span>
+                <h3 class="update-title">{{ slide.title }}</h3>
+                <p class="update-text">{{ slide.text }}</p>
+              </div>
+            </div>
+          </div>
+          <div class="updates-nav">
+            <button class="updates-dot" v-for="(_, i) in updateSlides" :key="'dot-'+i"
+                    :class="{ active: slideIndex === i }"
+                    @click="goToSlide(i)" aria-label="Go to slide"></button>
+          </div>
+          <button class="updates-arrow prev" @click="prevSlide" aria-label="Previous">‹</button>
+          <button class="updates-arrow next" @click="nextSlide" aria-label="Next">›</button>
+        </div>
+      </section>
 
       <!-- STORY SECTION -->
       <section class="story-section">
@@ -134,6 +193,39 @@ const togglePopup = () => { showPopup.value = !showPopup.value }
 const closePopup = () => { showPopup.value = false }
 const goTo = (route) => { showPopup.value = false; router.push(`/${route}`) }
 
+// ─── UPDATES SLIDER ───
+const slideIndex = ref(0)
+let slideTimer = null
+const updateSlides = ref([
+  {
+    tag: 'New drop',
+    title: 'Fresh from the high pastures',
+    text: 'Our latest small-batch produce is on its way from the hills — pure, seasonal, and made the traditional way.',
+    image: 'https://images.unsplash.com/photo-1464822759023-fed622ff2c3b?w=1200&q=80'
+  },
+  {
+    tag: 'In the mountains',
+    title: 'Life above the clouds',
+    text: 'Meet the families and landscapes behind every jar. Real places, real hands, real flavour.',
+    image: 'https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=1200&q=80'
+  },
+  {
+    tag: 'Kitchen stories',
+    title: 'How the hills taste at home',
+    text: 'From morning chai to slow-cooked meals — simple ways our community uses what comes from the pahad.',
+    image: 'https://images.unsplash.com/photo-1478144592103-25e218a04891?w=1200&q=80'
+  }
+])
+const goToSlide = (i) => { slideIndex.value = i; restartSlideTimer() }
+const nextSlide = () => { slideIndex.value = (slideIndex.value + 1) % updateSlides.value.length; restartSlideTimer() }
+const prevSlide = () => { slideIndex.value = (slideIndex.value - 1 + updateSlides.value.length) % updateSlides.value.length; restartSlideTimer() }
+const restartSlideTimer = () => {
+  if (slideTimer) clearInterval(slideTimer)
+  slideTimer = setInterval(() => {
+    slideIndex.value = (slideIndex.value + 1) % updateSlides.value.length
+  }, 5500)
+}
+
 const settled = ref(false)
 const loadedCards = ref([false, false, false, false, false])
 const imageLoaded = ref([false, false, false, false, false])
@@ -144,11 +236,11 @@ const configLoading = ref(true)
 // ─── DEFAULT CONFIG (fallback) ───
 const defaultConfig = {
   cards: [
-    { id: 'c1', style: 'distort', size: 'lg', label: 'Liquid Distort', rotate: -6, image: '', imgOffsetX: 0, imgOffsetY: 0, imgScale: 1.05, initialZ: 3 },
-    { id: 'c2', style: 'distort', size: 'sm', label: 'Liquid Distort', rotate: 4, image: '', imgOffsetX: 0, imgOffsetY: 0, imgScale: 1.1, initialZ: 2 },
-    { id: 'c3', style: 'specular', size: 'md', label: 'Specular Glass', rotate: -3, image: '', imgOffsetX: 0, imgOffsetY: 0, imgScale: 1.1, initialZ: 5 },
-    { id: 'c4', style: 'specular', size: 'sm', label: 'Specular Glass', rotate: 7, image: '', imgOffsetX: 0, imgOffsetY: 0, imgScale: 1.1, initialZ: 4 },
-    { id: 'c5', style: 'frosted', size: 'md', label: 'Simple Frosted', rotate: -8, image: '', imgOffsetX: 0, imgOffsetY: 0, imgScale: 1.1, initialZ: 1 },
+    { id: 'c1', style: 'distort', size: 'lg', label: '', rotate: -6, image: '', imgOffsetX: 0, imgOffsetY: 0, imgScale: 1.05, initialZ: 3 },
+    { id: 'c2', style: 'distort', size: 'sm', label: '', rotate: 4, image: '', imgOffsetX: 0, imgOffsetY: 0, imgScale: 1.1, initialZ: 2 },
+    { id: 'c3', style: 'specular', size: 'md', label: '', rotate: -3, image: '', imgOffsetX: 0, imgOffsetY: 0, imgScale: 1.1, initialZ: 5 },
+    { id: 'c4', style: 'specular', size: 'sm', label: '', rotate: 7, image: '', imgOffsetX: 0, imgOffsetY: 0, imgScale: 1.1, initialZ: 4 },
+    { id: 'c5', style: 'frosted', size: 'md', label: '', rotate: -8, image: '', imgOffsetX: 0, imgOffsetY: 0, imgScale: 1.1, initialZ: 1 },
   ],
   scatteredImages: {
     desktop: [
@@ -215,8 +307,8 @@ const scatteredByBreakpoint = computed(() => {
   return landingConfig.value?.scatteredImages || defaultConfig.scatteredImages
 })
 
-const hero = computed(() => landingConfig.value?.hero || defaultConfig.hero)
-const story = computed(() => landingConfig.value?.story || defaultConfig.story)
+const hero = computed(() => ({ ...defaultConfig.hero, ...(landingConfig.value?.hero || {}) }))
+const story = computed(() => ({ ...defaultConfig.story, ...(landingConfig.value?.story || {}) }))
 const socialLinks = computed(() => landingConfig.value?.socialLinks || defaultConfig.socialLinks)
 
 const getBreakpoint = (w) => (w < 768 ? 'mobile' : w < 1024 ? 'tablet' : 'desktop')
@@ -374,6 +466,7 @@ onMounted(async () => {
       settled.value = true
       const leafContainer = document.querySelector('.bg-scattered')
       if (leafContainer) leafContainer.classList.add('loaded')
+      restartSlideTimer()
     })
     cards.value.forEach((_, i) => {
       setTimeout(() => { loadedCards.value[i] = true }, 4700 + i * 200)
@@ -382,6 +475,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  if (slideTimer) clearInterval(slideTimer)
   window.removeEventListener('resize', updatePositions)
   window.removeEventListener('mousemove', onMouseMove)
   window.removeEventListener('mouseup', onMouseUp)
@@ -463,6 +557,22 @@ onUnmounted(() => {
 @keyframes slideUp { 0% { opacity: 0; transform: translateY(30px) } 100% { opacity: 1; transform: translateY(0) } }
 .tagline-dark { color: rgba(46,125,50,.85) !important; }
 
+.hero-headline {
+  font-family: Inter, sans-serif;
+  font-size: 1.05rem;
+  font-weight: 500;
+  color: rgba(245,237,224,.7);
+  margin-top: 14px;
+  letter-spacing: 1.5px;
+  text-align: center;
+  max-width: 420px;
+  line-height: 1.5;
+  opacity: 0;
+  animation: slideUp .6s ease-out .7s both;
+  transition: color 1s cubic-bezier(.16,1,.3,1);
+}
+.hero-headline-dark { color: rgba(26,42,26,.7) !important; }
+
 /* ─── CARDS ─── */
 /* CHANGED (#4): z-index raised to 50 so cards float above all text sections */
 .card-field { position: relative; z-index: 50; width: 100%; min-height: 380px; display: flex; align-items: center; justify-content: center; opacity: 0; transform: translate3d(0,30px,0); transition: opacity 1.2s cubic-bezier(.16,1,.3,1) .1s, transform 1.2s cubic-bezier(.16,1,.3,1) .1s; pointer-events: none; will-change: opacity, transform; padding: 20px 10px; }
@@ -503,15 +613,47 @@ onUnmounted(() => {
 .below-fold.below-visible { opacity: 1; visibility: visible; transition: opacity 1s cubic-bezier(.16,1,.3,1) .2s, visibility 0s linear 0s; }
 
 /* ─── EXPLORE BUTTON ─── */
-.cta-section { position: relative; z-index: 1; display: flex; justify-content: center; align-items: center; padding: 80px 40px 40px; opacity: 0; transform: translateY(30px); transition: opacity 1.2s cubic-bezier(.16,1,.3,1) .15s, transform 1.2s cubic-bezier(.16,1,.3,1) .15s; pointer-events: none; will-change: opacity, transform; }
+.cta-section { position: relative; z-index: 1; display: flex; justify-content: center; align-items: center; padding: 60px 40px 30px; opacity: 0; transform: translateY(30px); transition: opacity 1.2s cubic-bezier(.16,1,.3,1) .15s, transform 1.2s cubic-bezier(.16,1,.3,1) .15s; pointer-events: none; will-change: opacity, transform; }
 .cta-section.cta-visible { opacity: 1; transform: translateY(0); pointer-events: auto; }
+.cta-row { display: flex; gap: 18px; align-items: center; justify-content: center; flex-wrap: wrap; }
 .btn-wrap { cursor: pointer; transition: transform var(--anim-speed) ease; will-change: transform; }
 .btn-wrap:hover { transform: scale(var(--hover-scale)); }
 .btn-wrap:active { transform: scale(.96); }
-.glass-btn { all: unset; cursor: pointer; position: relative; display: flex; align-items: center; justify-content: center; padding: 40px 45px !important; border-radius: 40px; font-family: Inter, sans-serif; font-size: .75rem; font-weight: 600; color: #fff; margin-top: 40px; background: rgba(1,54,2,.885); text-shadow: 0 1px 3px rgba(0,0,0,.15); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); border: 1px solid rgba(93,217,99,.25); box-shadow: 0 4px 24px rgba(38,151,44,.488), inset 0 1px 0 rgba(255,255,255,.15); transition: all var(--anim-speed) ease; will-change: transform; letter-spacing: .3px; }
+.glass-btn { all: unset; cursor: pointer; position: relative; display: flex; align-items: center; justify-content: center; padding: 18px 36px !important; border-radius: 40px; font-family: Inter, sans-serif; font-size: .85rem; font-weight: 600; color: #fff; background: rgba(1,54,2,.885); text-shadow: 0 1px 3px rgba(0,0,0,.15); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); border: 1px solid rgba(93,217,99,.25); box-shadow: 0 4px 24px rgba(38,151,44,.488), inset 0 1px 0 rgba(255,255,255,.15); transition: all var(--anim-speed) ease; will-change: transform; letter-spacing: .3px; }
 .glass-btn:hover { background: rgba(32,200,37,.934); box-shadow: 0 6px 32px rgba(3,33,4,.2), inset 0 1px 0 rgba(255,255,255,.2); border-color: rgba(8,40,10,.891); }
 .glass-btn:active { transform: scale(.96); }
 .glass-btn span { position: relative; z-index: 1; }
+.glass-btn.primary-cta { background: rgba(1,54,2,.92); padding: 18px 40px !important; font-size: .9rem; }
+.glass-btn.secondary-cta { background: rgba(255,255,255,.55); color: #1a2a1a; border: 1px solid rgba(46,125,50,.25); box-shadow: 0 4px 18px rgba(0,0,0,.08); text-shadow: none; }
+.glass-btn.secondary-cta:hover { background: rgba(255,255,255,.8); border-color: rgba(46,125,50,.4); }
+
+/* ─── BENEFITS ─── */
+.benefits-section { position: relative; z-index: 1; max-width: 960px; margin: 0 auto; padding: 30px 32px 40px; text-align: center; }
+.benefits-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 28px; margin-top: 28px; }
+.benefit-item { background: rgba(46,125,50,.05); border: 1px solid rgba(46,125,50,.12); border-radius: 1.4rem; padding: 28px 18px; transition: transform .25s ease, box-shadow .25s ease; }
+.benefit-item:hover { transform: translateY(-4px); box-shadow: 0 12px 28px rgba(46,125,50,.1); }
+.benefit-icon { font-size: 1.8rem; margin-bottom: 12px; }
+.benefit-item h4 { font-family: Inter, sans-serif; font-size: .95rem; font-weight: 700; color: #1a2a1a; margin: 0 0 8px; }
+.benefit-item p { font-family: Inter, sans-serif; font-size: .82rem; line-height: 1.55; color: rgba(26,42,26,.7); margin: 0; }
+
+/* ─── UPDATES SLIDER ─── */
+.updates-section { position: relative; z-index: 1; max-width: 920px; margin: 0 auto; padding: 20px 24px 50px; text-align: center; }
+.updates-slider { position: relative; margin-top: 28px; border-radius: 1.6rem; overflow: hidden; background: rgba(46,125,50,.04); border: 1px solid rgba(46,125,50,.12); box-shadow: 0 12px 40px rgba(0,0,0,.06); }
+.updates-track { display: flex; transition: transform .55s cubic-bezier(.22,1,.36,1); will-change: transform; }
+.update-slide { min-width: 100%; display: grid; grid-template-columns: 1.15fr 1fr; align-items: stretch; }
+.update-image-wrap { position: relative; min-height: 280px; overflow: hidden; }
+.update-image { width: 100%; height: 100%; object-fit: cover; display: block; }
+.update-copy { display: flex; flex-direction: column; justify-content: center; text-align: left; padding: 36px 32px; background: rgba(255,255,255,.72); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); }
+.update-tag { display: inline-block; align-self: flex-start; font-family: Inter, sans-serif; font-size: .7rem; font-weight: 700; letter-spacing: 1.2px; text-transform: uppercase; color: var(--premium-green, #2e7d32); background: rgba(46,125,50,.1); padding: 5px 12px; border-radius: 40px; margin-bottom: 14px; }
+.update-title { font-family: Georgia, serif; font-size: 1.55rem; font-weight: 700; color: #1a2a1a; margin: 0 0 12px; line-height: 1.3; }
+.update-text { font-family: Inter, sans-serif; font-size: .95rem; line-height: 1.65; color: rgba(26,42,26,.72); margin: 0; }
+.updates-nav { position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%); display: flex; gap: 8px; z-index: 5; }
+.updates-dot { width: 8px; height: 8px; border-radius: 50%; border: none; padding: 0; cursor: pointer; background: rgba(26,42,26,.25); transition: background .2s, transform .2s; }
+.updates-dot.active { background: var(--premium-green, #2e7d32); transform: scale(1.25); }
+.updates-arrow { position: absolute; top: 50%; transform: translateY(-50%); z-index: 5; width: 40px; height: 40px; border-radius: 50%; border: none; background: rgba(255,255,255,.85); color: #1a2a1a; font-size: 1.5rem; line-height: 1; cursor: pointer; box-shadow: 0 4px 14px rgba(0,0,0,.1); transition: background .2s, transform .2s; display: flex; align-items: center; justify-content: center; }
+.updates-arrow:hover { background: #fff; transform: translateY(-50%) scale(1.06); }
+.updates-arrow.prev { left: 12px; }
+.updates-arrow.next { right: 12px; }
 
 /* ─── STORY ─── */
 .story-section { position: relative; z-index: 1; max-width: 800px; margin: 0 auto; padding: 60px 32px; text-align: center; }
@@ -582,17 +724,28 @@ onUnmounted(() => {
 @media (max-width: 768px) {
   .brand { font-size: 4.2rem; }
   .tagline { font-size: 1.1rem; letter-spacing: 4px; }
+  .hero-headline { font-size: .95rem; max-width: 320px; }
   .hero-wrapper.hero-settled { transform: scale3d(.65,.65,1) translate3d(0,0,0); padding-top: 18px; }
   .glass-card.lg { width: 160px; height: 160px; }
   .glass-card.md { width: 135px; height: 135px; }
   .glass-card.sm { width: 120px; height: 240px; }
   .card-field { min-height: 280px; padding: 10px; }
   .cta-section { padding: 30px 20px 20px; }
-  .glass-btn { height: 36px; font-size: .7rem; padding: 6px 10px; }
+  .cta-row { gap: 12px; }
+  .glass-btn { font-size: .75rem; padding: 14px 26px !important; }
+  .glass-btn.primary-cta { padding: 14px 28px !important; }
   .popup-btn { padding: 14px 36px; font-size: 1rem; min-width: 160px; }
   .popup-box { gap: 12px; }
   .story-heading { font-size: 2.2rem; }
   .section-heading { font-size: 1.6rem; }
+  .benefits-grid { grid-template-columns: repeat(2, 1fr); gap: 16px; }
+  .benefit-item { padding: 20px 14px; }
+  .update-slide { grid-template-columns: 1fr; }
+  .update-image-wrap { min-height: 200px; max-height: 220px; }
+  .update-copy { padding: 24px 20px 36px; text-align: center; }
+  .update-tag { align-self: center; }
+  .update-title { font-size: 1.3rem; }
+  .updates-arrow { width: 34px; height: 34px; font-size: 1.25rem; }
   /* CHANGED (#1): 2 columns on mobile, centered as a tight block */
   .products-row { grid-template-columns: repeat(2, 1fr); gap: 24px; max-width: fit-content; margin-left: auto; margin-right: auto; }
   .product-item { width: 140px; }
@@ -602,6 +755,7 @@ onUnmounted(() => {
 @media (max-width: 480px) {
   .brand { font-size: 3.4rem; }
   .tagline { font-size: 1rem; letter-spacing: 3px; }
+  .hero-headline { font-size: .85rem; letter-spacing: 1px; max-width: 280px; }
   .hero-wrapper.hero-settled { transform: scale3d(.55,.55,1) translate3d(0,0,0); padding-top: 16px; }
   .hero { padding: 8px; }
   .glass-card.lg { width: 120px; height: 120px; }
@@ -610,11 +764,23 @@ onUnmounted(() => {
   .card-field { min-height: 200px; padding: 5px; }
   .card-label { font-size: .5rem; top: 6px; left: 8px; padding: 2px 8px; }
   .cta-section { padding: 24px 20px 16px; }
-  .glass-btn { height: 60px; font-size: .65rem; padding: 15px 18px !important; border-radius: 30px; }
+  .cta-row { flex-direction: column; gap: 10px; }
+  .glass-btn { font-size: .7rem; padding: 14px 28px !important; border-radius: 30px; }
   .popup-btn { padding: 12px 28px; font-size: .9rem; min-width: 140px; }
   .popup-box { gap: 10px; }
   .story-heading { font-size: 1.8rem; }
   .section-body { font-size: .85rem; }
+  .benefits-grid { grid-template-columns: 1fr 1fr; gap: 12px; }
+  .benefit-item { padding: 16px 12px; }
+  .benefit-icon { font-size: 1.5rem; }
+  .benefit-item h4 { font-size: .85rem; }
+  .benefit-item p { font-size: .75rem; }
+  .updates-section { padding: 16px 12px 36px; }
+  .update-image-wrap { min-height: 170px; max-height: 180px; }
+  .update-copy { padding: 18px 16px 32px; }
+  .update-title { font-size: 1.15rem; }
+  .update-text { font-size: .85rem; }
+  .updates-arrow { display: none; }
   .products-row { grid-template-columns: repeat(2, 1fr); gap: 12px; max-width: fit-content; margin-left: auto; margin-right: auto; }
   .product-item { width: 100%; max-width: 140px; margin: 0 auto; }
   .product-img { width: 120px; height: 120px; margin: 0 auto 10px; }
